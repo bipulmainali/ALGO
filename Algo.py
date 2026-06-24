@@ -10,7 +10,11 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- UI CONFIGURATION ---
-st.set_page_config(page_title="Universal Algo Scanner | Level 3", layout="wide")
+st.set_page_config(
+    page_title="Universal Algo Scanner | Level 3.4", 
+    layout="wide", 
+    initial_sidebar_state="auto" # Auto-collapses on mobile, stays open on desktop
+)
 st.title("📈 Universal Trading Terminal (Pro)")
 st.markdown("*Quantitative Research Engine & Mass-Scanner. Educational use only.*")
 
@@ -34,7 +38,6 @@ class AlgoTradingScanner:
         self.major_indexes = ['SPY', 'QQQ', 'DIA', 'IWM', 'SPX', 'NDX']
         self.is_index = self.ticker in self.major_indexes
         
-        # Default dynamic parameters
         self.p = params if params else {
             'ema_fast': 9, 'ema_slow': 21,
             'sma_fast': 50, 'sma_slow': 200,
@@ -114,7 +117,6 @@ class AlgoTradingScanner:
         return df.dropna()
 
     def get_signal(self, row, is_intraday):
-        """Unified logic engine for both live scanner and backtester."""
         action = "WAIT 🟡"
         main_trend = "Bullish" if row['SMA_Fast'] > row['SMA_Slow'] else "Bearish"
         
@@ -137,10 +139,9 @@ class AlgoTradingScanner:
         return action
 
     def run_backtest(self, df, is_intraday):
-        """Lightweight historical backtester to calculate Win Rate."""
         wins, losses, total_setups = 0, 0, 0
         
-        for i in range(100, len(df) - 10): # Need buffer for future checks
+        for i in range(100, len(df) - 10): 
             row = df.iloc[i]
             signal = self.get_signal(row, is_intraday)
             
@@ -148,10 +149,12 @@ class AlgoTradingScanner:
                 total_setups += 1
                 entry = row['Close']
                 atr = row['ATR']
-                sl = entry - (1.5 * atr)
-                tp = entry + (1.0 * atr) # Target TP1 for Win Rate math
                 
-                # Look forward 10 bars to see if TP or SL hit first
+                if is_intraday:
+                    sl, tp = entry - (1.5 * atr), entry + (1.0 * atr) 
+                else:
+                    sl, tp = entry - (2.0 * atr), entry + (2.0 * atr) 
+                
                 for j in range(1, 11):
                     future_bar = df.iloc[i + j]
                     if future_bar['Low'] <= sl:
@@ -177,11 +180,9 @@ st.sidebar.header("Terminal Settings")
 app_mode = st.sidebar.radio("Select Mode", ["Single Ticker Deep-Dive", "Watchlist Mass-Scanner"])
 
 st.sidebar.markdown("---")
-# THE NEW TIMEFRAME SLIDER
 selected_tf = st.sidebar.select_slider("Time Interval", options=["5m", "15m", "1h", "4h", "1d", "1wk"], value="1h")
 
 st.sidebar.markdown("---")
-# DYNAMIC PARAMETERS MENU
 with st.sidebar.expander("⚙️ Tuning Parameters (Advanced)"):
     st.markdown("**Intraday Settings**")
     ema_f = st.number_input("Fast EMA", value=9, step=1)
@@ -234,7 +235,7 @@ if app_mode == "Single Ticker Deep-Dive":
 
             earnings_risk, risk_message = scanner.check_earnings_risk()
             
-            # --- TOP DASHBOARD ---
+            # 1. TOP DASHBOARD METRICS
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric(f"Current {input_ticker}", f"${price:.2f}")
             col2.metric("VIX (Macro)", f"{latest['VIX']:.2f}")
@@ -244,16 +245,32 @@ if app_mode == "Single Ticker Deep-Dive":
 
             st.markdown("---")
 
-            # --- BACKTESTER RESULTS ---
+            # 2. HISTORICAL BACKTEST
             st.subheader("🧪 Historical Strategy Backtest")
             setups, win_rate = scanner.run_backtest(df, is_intraday)
             bt_col1, bt_col2 = st.columns(2)
             bt_col1.write(f"**Historical Setups Found:** {setups}")
             bt_col2.write(f"**Historical Win Rate (TP1):** {win_rate:.1f}%")
-            st.caption("*Backtest assumes standard 1.5 ATR Stop Loss and 1.0 ATR Target hitting within the next 10 bars.*")
+            
+            if is_intraday:
+                st.caption("*Intraday Backtest assumes hitting a 1.0 ATR Target before a 1.5 ATR Stop Loss.*")
+            else:
+                st.caption("*Swing Backtest assumes hitting a 2.0 ATR Target before a 2.0 ATR Stop Loss.*")
+                
             st.markdown("---")
 
-            # --- TRADE PLAN ---
+            # 3. STRUCTURAL LEVELS (MOVED HERE)
+            st.subheader("🧱 Key Structural Levels")
+            nearest_supp_str = f"\${supp[0]:.2f}" if len(supp) > 0 else "N/A (No Floor Detected)"
+            nearest_res_str = f"\${res[0]:.2f}" if len(res) > 0 else "N/A (Blue Sky Breakout 🚀)"
+            
+            struct_col1, struct_col2 = st.columns(2)
+            struct_col1.write(f"**Nearest Resistance (Ceiling):** {nearest_res_str}")
+            struct_col2.write(f"**Nearest Support (Floor):** {nearest_supp_str}")
+
+            st.markdown("---")
+
+            # 4. ALGORITHMIC TRADE PLAN
             st.subheader("🤖 Algorithmic Trade Plan")
             action = scanner.get_signal(latest, is_intraday)
 
@@ -261,23 +278,29 @@ if app_mode == "Single Ticker Deep-Dive":
                 action = f"WAIT 🟡 (EARNINGS RISK: {risk_message})"
 
             if "BUY" in action:
-                sl, tp1, tp2, tp3 = price - (1.5 * atr), price + atr, price + (2 * atr), price + (3 * atr)
+                if is_intraday:
+                    sl, tp1, tp2, tp3 = price - (1.5 * atr), price + (1.0 * atr), price + (2.0 * atr), price + (3.0 * atr)
+                else:
+                    sl, tp1, tp2, tp3 = price - (2.0 * atr), price + (2.0 * atr), price + (4.0 * atr), price + (6.0 * atr)
             else:
                 sl = tp1 = tp2 = tp3 = 0.0
 
             st.write(f"**Recommendation:** {action} *(Engine: {'Intraday' if is_intraday else 'Swing'} | Mode: {'Index ETF' if scanner.is_index else 'Individual Stock'})*")
             
             if "BUY" in action:
+                pb_price = supp[0] if len(supp) > 0 else price - atr
+                
                 plan_col1, plan_col2 = st.columns(2)
                 with plan_col1:
-                    st.write(f"**Entry Zone:** \${price - (atr*0.2):.2f} - \${price + (atr*0.2):.2f}")
-                    st.write(f"**Stop Loss:** \${sl:.2f}")
+                    st.write(f"**Immediate Entry (Momentum):** \${price - (atr*0.2):.2f} - \${price + (atr*0.2):.2f}")
+                    st.write(f"**Pullback Entry (Limit Order):** \${pb_price:.2f}")
+                    st.write(f"**Stop Loss:** \${sl:.2f} *(Multi: {'1.5x' if is_intraday else '2.0x'})*")
                 with plan_col2:
-                    st.write(f"**TP 1 (Safe):** \${tp1:.2f}")
-                    st.write(f"**TP 2 (Target):** \${tp2:.2f}")
-                    st.write(f"**TP 3 (Runner):** \${tp3:.2f}")
+                    st.write(f"**TP 1 (Safe):** \${tp1:.2f} *(Multi: {'1.0x' if is_intraday else '2.0x'})*")
+                    st.write(f"**TP 2 (Target):** \${tp2:.2f} *(Multi: {'2.0x' if is_intraday else '4.0x'})*")
+                    st.write(f"**TP 3 (Runner):** \${tp3:.2f} *(Multi: {'3.0x' if is_intraday else '6.0x'})*")
 
-            # --- INTERACTIVE CHART ---
+            # 5. CHARTING
             st.subheader(f"Interactive Price Action: {input_ticker} ({selected_tf})")
             display_candles = 250 if is_intraday else 150 if selected_tf in ['1h', '4h'] else 100
             chart_df = df.tail(display_candles).copy() 
@@ -316,7 +339,11 @@ elif app_mode == "Watchlist Mass-Scanner":
     st.subheader(f"🔭 Watchlist Screener ({selected_tf})")
     st.write("Paste a list of tickers separated by commas. The engine will scan them all and only show active BUY setups.")
     
-    ticker_input = st.text_area("Watchlist Tickers:", value="SPY, QQQ, TSLA, AAPL, MSFT, NVDA, AMZN, META, GOOG, PLTR, AMD, SOXX, ADP, UHC, F").upper()
+    ticker_input = st.text_area(
+        "Watchlist Tickers:", 
+        value="SPY, QQQ, TSLA, AAPL, MSFT, NVDA, AMZN, META, GOOG, PLTR, AMD, SOXX, ADP, UHC, F"
+    ).upper()
+    
     run_mass_scan = st.button("Initialize Mass Scan", type="primary")
     
     if run_mass_scan:
@@ -340,8 +367,6 @@ elif app_mode == "Watchlist Mass-Scanner":
             if not df.empty:
                 df = scanner.apply_indicators(df, selected_tf)
                 latest = df.iloc[-1]
-                
-                # Check fundamental risk
                 earnings_risk, _ = scanner.check_earnings_risk()
                 
                 if not earnings_risk:
@@ -349,13 +374,27 @@ elif app_mode == "Watchlist Mass-Scanner":
                     if "BUY" in action:
                         atr = latest['ATR']
                         price = latest['Close']
+                        supp, res = scanner.find_support_resistance(df, order=15)
+                        
+                        if is_intraday:
+                            sl = price - (1.5 * atr)
+                            tp1 = price + (1.0 * atr)
+                        else:
+                            sl = price - (2.0 * atr)
+                            tp1 = price + (2.0 * atr)
+                            
+                        pb_price = supp[0] if len(supp) > 0 else price - atr
+                        nearest_res = res[0] if len(res) > 0 else price + (atr * 3)
+
                         buy_list.append({
                             "Ticker": tick,
                             "Price": f"${price:.2f}",
                             "RSI": round(latest['RSI'], 2),
-                            "Entry Zone": f"${price-(atr*0.2):.2f} - ${price+(atr*0.2):.2f}",
-                            "Stop Loss": f"${price-(1.5*atr):.2f}",
-                            "Target (TP1)": f"${price+atr:.2f}"
+                            "Immediate Entry": f"${price-(atr*0.2):.2f}",
+                            "Pullback (Limit)": f"${pb_price:.2f}",
+                            "Nearest Res": f"${nearest_res:.2f}",
+                            "Stop Loss": f"${sl:.2f}",
+                            "Target (TP1)": f"${tp1:.2f}"
                         })
             
             progress_bar.progress((i + 1) / len(ticker_list))
