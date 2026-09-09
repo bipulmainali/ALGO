@@ -16,7 +16,7 @@ st.set_page_config(
     initial_sidebar_state="auto" # Auto-collapses on mobile, stays open on desktop
 )
 st.title("📈 Universal Trading Terminal (Pro)")
-st.markdown("*Quantitative Research Engine & Mass-Scanner. Educational use only.*")
+st.markdown("*Quantitative Research Engine & Mass-Scanner.*")
 
 # --- CORE LOGIC ---
 class AlgoTradingScanner:
@@ -341,7 +341,7 @@ elif app_mode == "Watchlist Mass-Scanner":
     
     ticker_input = st.text_area(
         "Watchlist Tickers:", 
-        value="SPY, QQQ, TSLA, AAPL, MSFT, NVDA, AMZN, META, GOOG, PLTR, AMD, SOXX, ADP, UHC, F"
+        value="SPY, QQQ, TSLA, AAPL, MSFT, NVDA, AMZN, META, GOOG, NBIS, PLTR, AMD, SOXX, MU, ADP, UHC"
     ).upper()
     
     run_mass_scan = st.button("Initialize Mass Scan", type="primary")
