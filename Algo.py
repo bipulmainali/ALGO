@@ -11,12 +11,15 @@ warnings.filterwarnings('ignore')
 
 # --- UI CONFIGURATION ---
 st.set_page_config(
-    page_title="Universal Algo Scanner | Level 3.4", 
+    page_title="Universal Algo Terminal | Pro v4.0", 
     layout="wide", 
-    initial_sidebar_state="auto" # Auto-collapses on mobile, stays open on desktop
+    initial_sidebar_state="auto"
 )
-st.title("📈 Universal Trading Terminal (Pro)")
-st.markdown("*Quantitative Research Engine & Mass-Scanner.*")
+st.title("📈 Universal Trading Terminal (Pro v4.0)")
+st.markdown("*Multi-Timeframe Confluence & Quant Execution Engine. Educational use only.*")
+
+# --- UPDATED WATCHLIST ---
+DEFAULT_WATCHLIST = "SPY, QQQ, TSLA, AAPL, MSFT, NVDA, AMZN, META, GOOG, PLTR, AMD, SOXX, ADP, UNH, SPCX, MU, NBIS, IREN"
 
 # --- CORE LOGIC ---
 class AlgoTradingScanner:
@@ -41,7 +44,8 @@ class AlgoTradingScanner:
         self.p = params if params else {
             'ema_fast': 9, 'ema_slow': 21,
             'sma_fast': 50, 'sma_slow': 200,
-            'rsi_len': 14, 'rsi_ob': 60, 'rsi_os': 50
+            'rsi_len': 14, 'rsi_ob': 60, 'rsi_os': 50,
+            'adx_thresh': 20, 'adx_len': 14
         }
 
     def check_earnings_risk(self):
@@ -97,21 +101,38 @@ class AlgoTradingScanner:
         df['RSI'] = ta.rsi(df['Close'], length=self.p['rsi_len'])
         df['SMA_Fast'] = ta.sma(df['Close'], length=self.p['sma_fast'])
         df['SMA_Slow'] = ta.sma(df['Close'], length=self.p['sma_slow'])
+        df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
+        
+        # ADX Regime Filter
+        adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=self.p['adx_len'])
+        if adx_df is not None and not adx_df.empty:
+            adx_col = [c for c in adx_df.columns if c.startswith('ADX_')]
+            df['ADX'] = adx_df[adx_col[0]] if adx_col else 0
+        else:
+            df['ADX'] = 0
+
+        # Bollinger Bands for Range/Exhaustion Boundaries
+        bb = ta.bbands(df['Close'], length=20, std=2.0)
+        if bb is not None and not bb.empty:
+            bbl_col = [c for c in bb.columns if c.startswith('BBL_')]
+            bbu_col = [c for c in bb.columns if c.startswith('BBU_')]
+            df['BB_Lower'] = bb[bbl_col[0]] if bbl_col else df['Close']
+            df['BB_Upper'] = bb[bbu_col[0]] if bbu_col else df['Close']
+        else:
+            df['BB_Lower'], df['BB_Upper'] = df['Close'], df['Close']
         
         is_intraday = tf_str in ['5m', '15m']
-        
         if is_intraday:
             df['EMA_Fast'] = ta.ema(df['Close'], length=self.p['ema_fast'])
             df['EMA_Slow'] = ta.ema(df['Close'], length=self.p['ema_slow'])
             df['VWAP'] = ta.vwap(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume'], anchor="D")
-            df['MACD_Hist'], df['Vol_SMA'] = 0, 0
+            df['MACD_Hist'] = 0
         else:
             macd = ta.macd(df['Close'])
             if macd is not None and not macd.empty:
                 macd_col = [c for c in macd.columns if 'MACDh' in c]
                 df['MACD_Hist'] = macd[macd_col[0]] if macd_col else 0
             else: df['MACD_Hist'] = 0
-            df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
             df['EMA_Fast'], df['EMA_Slow'], df['VWAP'] = 0, 0, 0
             
         return df.dropna()
@@ -120,26 +141,60 @@ class AlgoTradingScanner:
         action = "WAIT 🟡"
         main_trend = "Bullish" if row['SMA_Fast'] > row['SMA_Slow'] else "Bearish"
         
+        # Regime Check: Low ADX indicates choppy / non-trending conditions
+        is_trending = row['ADX'] >= self.p['adx_thresh']
+        vol_confirmed = row['Volume'] >= (row['Vol_SMA'] * 0.9)
+        not_overextended_up = row['Close'] <= row['BB_Upper']
+        not_overextended_dn = row['Close'] >= row['BB_Lower']
+        
         if is_intraday:
+            if not is_trending:
+                return "CHOP / RANGE 🟡 (ADX < Threshold)"
+                
             if self.is_index:
-                if row['EMA_Fast'] > row['EMA_Slow'] and row['Close'] > row['VWAP'] and row['RSI'] < self.p['rsi_os'] and row['VIX'] < 25:
+                if (row['EMA_Fast'] > row['EMA_Slow'] and 
+                    row['Close'] > row['VWAP'] and 
+                    row['RSI'] < self.p['rsi_os'] and 
+                    row['VIX'] < 25 and 
+                    vol_confirmed and 
+                    not_overextended_up):
                     action = "BUY 🟢"
+                elif (row['EMA_Fast'] < row['EMA_Slow'] and 
+                      row['Close'] < row['VWAP'] and 
+                      row['RSI'] > 60 and 
+                      not_overextended_dn):
+                    action = "SELL 🔴"
             else:
-                if row['EMA_Fast'] > row['EMA_Slow'] and row['Close'] > row['VWAP'] and row['RSI'] < (self.p['rsi_os'] + 15):
+                if (row['EMA_Fast'] > row['EMA_Slow'] and 
+                    row['Close'] > row['VWAP'] and 
+                    row['RSI'] < (self.p['rsi_os'] + 15) and 
+                    vol_confirmed and 
+                    not_overextended_up):
                     action = "BUY 🟢"
+                elif (row['EMA_Fast'] < row['EMA_Slow'] and 
+                      row['Close'] < row['VWAP'] and 
+                      row['RSI'] > 45 and 
+                      not_overextended_dn):
+                    action = "SELL 🔴"
         else:
             macd_bullish = row['MACD_Hist'] > 0
-            vol_confirmed = row['Volume'] > row['Vol_SMA']
+            macd_bearish = row['MACD_Hist'] < 0
+            
             if self.is_index:
-                if "Bullish" in main_trend and row['RSI'] < (self.p['rsi_os'] - 10) and row['VIX'] < 25 and macd_bullish:
+                if "Bullish" in main_trend and row['RSI'] < (self.p['rsi_os'] - 10) and row['VIX'] < 25 and macd_bullish and is_trending:
                     action = "BUY 🟢"
+                elif "Bearish" in main_trend and row['RSI'] > 60 and macd_bearish:
+                    action = "SELL 🔴"
             else:
-                if "Bullish" in main_trend and row['RSI'] < self.p['rsi_os'] and macd_bullish and vol_confirmed:
+                if "Bullish" in main_trend and row['RSI'] < self.p['rsi_os'] and macd_bullish and vol_confirmed and is_trending:
                     action = "BUY 🟢"
+                elif "Bearish" in main_trend and row['RSI'] > 50 and macd_bearish:
+                    action = "SELL 🔴"
         return action
 
     def run_backtest(self, df, is_intraday):
         wins, losses, total_setups = 0, 0, 0
+        if len(df) < 110: return 0, 0
         
         for i in range(100, len(df) - 10): 
             row = df.iloc[i]
@@ -176,28 +231,33 @@ class AlgoTradingScanner:
         return sup, res
 
 # --- APP LAYOUT ---
-st.sidebar.header("Terminal Settings")
-app_mode = st.sidebar.radio("Select Mode", ["Single Ticker Deep-Dive", "Watchlist Mass-Scanner"])
+st.sidebar.header("Terminal Navigation")
+app_mode = st.sidebar.radio(
+    "Select Operating Mode", 
+    ["Single Ticker Deep-Dive", "Single-TF Watchlist Scanner", "Multi-Timeframe Matrix (All Intervals)"]
+)
 
 st.sidebar.markdown("---")
 selected_tf = st.sidebar.select_slider("Time Interval", options=["5m", "15m", "1h", "4h", "1d", "1wk"], value="1h")
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("⚙️ Tuning Parameters (Advanced)"):
-    st.markdown("**Intraday Settings**")
+    st.markdown("**Regime & Momentum Gates**")
+    adx_t = st.number_input("Min ADX Trend Strength", value=20, step=1)
+    rsi_l = st.number_input("RSI Length", value=14, step=1)
+    rsi_os = st.number_input("RSI Dip Entry Base", value=50, step=5)
+    st.markdown("**Intraday EMAs**")
     ema_f = st.number_input("Fast EMA", value=9, step=1)
     ema_s = st.number_input("Slow EMA", value=21, step=1)
-    st.markdown("**Swing Settings**")
+    st.markdown("**Swing Trend Filters**")
     sma_f = st.number_input("Fast SMA", value=50, step=10)
     sma_s = st.number_input("Slow SMA", value=200, step=10)
-    st.markdown("**Momentum Settings**")
-    rsi_l = st.number_input("RSI Length", value=14, step=1)
-    rsi_os = st.number_input("RSI Oversold Base", value=50, step=5)
 
 algo_params = {
     'ema_fast': ema_f, 'ema_slow': ema_s, 
     'sma_fast': sma_f, 'sma_slow': sma_s, 
-    'rsi_len': rsi_l, 'rsi_os': rsi_os
+    'rsi_len': rsi_l, 'rsi_os': rsi_os,
+    'adx_thresh': adx_t, 'adx_len': 14
 }
 
 # ==========================================
@@ -208,12 +268,12 @@ if app_mode == "Single Ticker Deep-Dive":
     run_scan = st.sidebar.button("Run Quantitative Scan", type="primary")
 
     if run_scan:
-        with st.spinner(f"Crunching math & backtesting {input_ticker}..."):
+        with st.spinner(f"Analyzing {input_ticker}..."):
             scanner = AlgoTradingScanner(ticker=input_ticker, timeframe=selected_tf, params=algo_params)
             df = scanner.fetch_data(input_ticker, selected_tf)
             
             if df.empty:
-                st.error(f"No data found for '{input_ticker}'.")
+                st.error(f"No data found for '{input_ticker}'. Verify ticker symbol.")
                 st.stop()
                 
             df = scanner.apply_indicators(df, selected_tf)
@@ -224,6 +284,7 @@ if app_mode == "Single Ticker Deep-Dive":
             is_intraday = selected_tf in ['5m', '15m']
             main_trend = "Bullish 🟢" if latest['SMA_Fast'] > latest['SMA_Slow'] else "Bearish 🔴"
 
+            # Anchor Calculation (Advisory Display Only)
             anchor_tf = scanner.anchor_map.get(selected_tf)
             anchor_trend_str = "N/A (Macro Supreme)"
             if anchor_tf:
@@ -235,34 +296,33 @@ if app_mode == "Single Ticker Deep-Dive":
 
             earnings_risk, risk_message = scanner.check_earnings_risk()
             
-            # 1. TOP DASHBOARD METRICS
+            # Dashboard Metrics
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric(f"Current {input_ticker}", f"${price:.2f}")
             col2.metric("VIX (Macro)", f"{latest['VIX']:.2f}")
-            col3.metric("RSI", f"{latest['RSI']:.2f}")
-            col4.metric("Local Trend", main_trend)
+            col3.metric("RSI (14)", f"{latest['RSI']:.2f}")
+            col4.metric(f"ADX (Regime)", f"{latest['ADX']:.1f}", delta="Trending" if latest['ADX'] >= algo_params['adx_thresh'] else "Chop")
             col5.metric(f"Anchor ({anchor_tf if anchor_tf else 'Macro'})", anchor_trend_str)
 
             st.markdown("---")
 
-            # 2. HISTORICAL BACKTEST
+            # Backtest Performance
             st.subheader("🧪 Historical Strategy Backtest")
             setups, win_rate = scanner.run_backtest(df, is_intraday)
             bt_col1, bt_col2 = st.columns(2)
-            bt_col1.write(f"**Historical Setups Found:** {setups}")
+            bt_col1.write(f"**Historical Setups Evaluated:** {setups}")
             bt_col2.write(f"**Historical Win Rate (TP1):** {win_rate:.1f}%")
-            
             if is_intraday:
-                st.caption("*Intraday Backtest assumes hitting a 1.0 ATR Target before a 1.5 ATR Stop Loss.*")
+                st.caption("*Intraday model: 1.0 ATR Target vs 1.5 ATR Stop Loss with ADX/RVOL validation.*")
             else:
-                st.caption("*Swing Backtest assumes hitting a 2.0 ATR Target before a 2.0 ATR Stop Loss.*")
+                st.caption("*Swing model: 2.0 ATR Target vs 2.0 ATR Stop Loss with ADX validation.*")
                 
             st.markdown("---")
 
-            # 3. STRUCTURAL LEVELS (MOVED HERE)
+            # Key Structural Levels
             st.subheader("🧱 Key Structural Levels")
-            nearest_supp_str = f"\${supp[0]:.2f}" if len(supp) > 0 else "N/A (No Floor Detected)"
-            nearest_res_str = f"\${res[0]:.2f}" if len(res) > 0 else "N/A (Blue Sky Breakout 🚀)"
+            nearest_supp_str = f"${supp[0]:.2f}" if len(supp) > 0 else "N/A (No Floor Detected)"
+            nearest_res_str = f"${res[0]:.2f}" if len(res) > 0 else "N/A (Blue Sky Breakout 🚀)"
             
             struct_col1, struct_col2 = st.columns(2)
             struct_col1.write(f"**Nearest Resistance (Ceiling):** {nearest_res_str}")
@@ -270,7 +330,7 @@ if app_mode == "Single Ticker Deep-Dive":
 
             st.markdown("---")
 
-            # 4. ALGORITHMIC TRADE PLAN
+            # Trade Plan Generator
             st.subheader("🤖 Algorithmic Trade Plan")
             action = scanner.get_signal(latest, is_intraday)
 
@@ -292,25 +352,30 @@ if app_mode == "Single Ticker Deep-Dive":
                 
                 plan_col1, plan_col2 = st.columns(2)
                 with plan_col1:
-                    st.write(f"**Immediate Entry (Momentum):** \${price - (atr*0.2):.2f} - \${price + (atr*0.2):.2f}")
-                    st.write(f"**Pullback Entry (Limit Order):** \${pb_price:.2f}")
-                    st.write(f"**Stop Loss:** \${sl:.2f} *(Multi: {'1.5x' if is_intraday else '2.0x'})*")
+                    st.write(f"**Immediate Entry (Momentum):** ${price - (atr*0.2):.2f} - ${price + (atr*0.2):.2f}")
+                    st.write(f"**Pullback Entry (Limit Order):** ${pb_price:.2f}")
+                    st.write(f"**Stop Loss:** ${sl:.2f} *(Multi: {'1.5x' if is_intraday else '2.0x'})*")
                 with plan_col2:
-                    st.write(f"**TP 1 (Safe):** \${tp1:.2f} *(Multi: {'1.0x' if is_intraday else '2.0x'})*")
-                    st.write(f"**TP 2 (Target):** \${tp2:.2f} *(Multi: {'2.0x' if is_intraday else '4.0x'})*")
-                    st.write(f"**TP 3 (Runner):** \${tp3:.2f} *(Multi: {'3.0x' if is_intraday else '6.0x'})*")
+                    st.write(f"**TP 1 (Safe):** ${tp1:.2f} *(Multi: {'1.0x' if is_intraday else '2.0x'})*")
+                    st.write(f"**TP 2 (Target):** ${tp2:.2f} *(Multi: {'2.0x' if is_intraday else '4.0x'})*")
+                    st.write(f"**TP 3 (Runner):** ${tp3:.2f} *(Multi: {'3.0x' if is_intraday else '6.0x'})*")
 
-            # 5. CHARTING
-            st.subheader(f"Interactive Price Action: {input_ticker} ({selected_tf})")
+            # Price Action Plotly Rendering
+            st.subheader(f"Price Action: {input_ticker} ({selected_tf})")
             display_candles = 250 if is_intraday else 150 if selected_tf in ['1h', '4h'] else 100
             chart_df = df.tail(display_candles).copy() 
             
-            fig = go.Figure(data=[go.Candlestick(x=chart_df.index, open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'], name=input_ticker)])
+            fig = go.Figure(data=[go.Candlestick(
+                x=chart_df.index, open=chart_df['Open'], high=chart_df['High'], 
+                low=chart_df['Low'], close=chart_df['Close'], name=input_ticker
+            )])
             
             if is_intraday:
                 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['VWAP'], line=dict(color='yellow', width=2, dash='dot'), name='VWAP'))
                 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['EMA_Fast'], line=dict(color='cyan', width=1.5), name=f'{ema_f} EMA'))
                 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['EMA_Slow'], line=dict(color='magenta', width=1.5), name=f'{ema_s} EMA'))
+                fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['BB_Upper'], line=dict(color='rgba(255,255,255,0.3)', width=1, dash='dash'), name='Upper BB'))
+                fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['BB_Lower'], line=dict(color='rgba(255,255,255,0.3)', width=1, dash='dash'), name='Lower BB'))
             else:
                 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['SMA_Fast'], line=dict(color='orange', width=1.5), name=f'{sma_f} MA'))
                 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['SMA_Slow'], line=dict(color='blue', width=1.5), name=f'{sma_s} MA'))
@@ -328,41 +393,27 @@ if app_mode == "Single Ticker Deep-Dive":
                 for i in range(1, len(new_days)):
                     fig.add_vline(x=new_days.index[i], line_width=1, line_dash="dot", line_color="rgba(255, 255, 255, 0.15)")
 
-            fig.update_layout(xaxis_rangeslider_visible=False, height=800, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
+            fig.update_layout(xaxis_rangeslider_visible=False, height=750, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-
 # ==========================================
-# MODE 2: WATCHLIST MASS-SCANNER
+# MODE 2: SINGLE-TF WATCHLIST SCANNER
 # ==========================================
-elif app_mode == "Watchlist Mass-Scanner":
-    st.subheader(f"🔭 Watchlist Screener ({selected_tf})")
-    st.write("Paste a list of tickers separated by commas. The engine will scan them all and only show active BUY setups.")
-    
-    ticker_input = st.text_area(
-        "Watchlist Tickers:", 
-        value="SPY, QQQ, TSLA, AAPL, MSFT, NVDA, AMZN, META, GOOG, NBIS, PLTR, AMD, SOXX, MU, ADP, UHC"
-    ).upper()
-    
-    run_mass_scan = st.button("Initialize Mass Scan", type="primary")
+elif app_mode == "Single-TF Watchlist Scanner":
+    st.subheader(f"🔭 Single-Interval Screener ({selected_tf})")
+    ticker_input = st.text_area("Watchlist Tickers:", value=DEFAULT_WATCHLIST).upper()
+    run_mass_scan = st.button("Initialize Scan", type="primary")
     
     if run_mass_scan:
         ticker_list = [t.strip() for t in ticker_input.split(",") if t.strip()]
-        
-        if not ticker_list:
-            st.error("Please enter at least one ticker.")
-            st.stop()
-            
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
         buy_list = []
         is_intraday = selected_tf in ['5m', '15m']
         
         for i, tick in enumerate(ticker_list):
             status_text.text(f"Scanning {tick} ({i+1}/{len(ticker_list)})...")
             scanner = AlgoTradingScanner(ticker=tick, timeframe=selected_tf, params=algo_params)
-            
             df = scanner.fetch_data(tick, selected_tf)
             if not df.empty:
                 df = scanner.apply_indicators(df, selected_tf)
@@ -375,36 +426,104 @@ elif app_mode == "Watchlist Mass-Scanner":
                         atr = latest['ATR']
                         price = latest['Close']
                         supp, res = scanner.find_support_resistance(df, order=15)
-                        
-                        if is_intraday:
-                            sl = price - (1.5 * atr)
-                            tp1 = price + (1.0 * atr)
-                        else:
-                            sl = price - (2.0 * atr)
-                            tp1 = price + (2.0 * atr)
-                            
+                        sl = price - (1.5 * atr if is_intraday else 2.0 * atr)
+                        tp1 = price + (1.0 * atr if is_intraday else 2.0 * atr)
                         pb_price = supp[0] if len(supp) > 0 else price - atr
                         nearest_res = res[0] if len(res) > 0 else price + (atr * 3)
 
                         buy_list.append({
                             "Ticker": tick,
                             "Price": f"${price:.2f}",
-                            "RSI": round(latest['RSI'], 2),
+                            "ADX": round(latest['ADX'], 1),
+                            "RSI": round(latest['RSI'], 1),
                             "Immediate Entry": f"${price-(atr*0.2):.2f}",
                             "Pullback (Limit)": f"${pb_price:.2f}",
                             "Nearest Res": f"${nearest_res:.2f}",
                             "Stop Loss": f"${sl:.2f}",
                             "Target (TP1)": f"${tp1:.2f}"
                         })
-            
             progress_bar.progress((i + 1) / len(ticker_list))
             
         status_text.text("Scan Complete!")
         st.markdown("---")
         
         if buy_list:
-            st.success(f"Found {len(buy_list)} active setups!")
-            results_df = pd.DataFrame(buy_list)
-            st.dataframe(results_df, use_container_width=True, hide_index=True)
+            st.success(f"Found {len(buy_list)} active setups with Regime Confirmation!")
+            st.dataframe(pd.DataFrame(buy_list), use_container_width=True, hide_index=True)
         else:
-            st.info("No active 'BUY' setups found in this watchlist right now based on your current parameters.")
+            st.info("No active setups qualified under current ADX and Momentum thresholds.")
+
+# ==========================================
+# MODE 3: MULTI-TIMEFRAME MATRIX (ALL INTERVALS)
+# ==========================================
+elif app_mode == "Multi-Timeframe Matrix (All Intervals)":
+    st.subheader("🌐 Multi-Timeframe Confluence Matrix")
+    st.markdown("Scans every ticker across **5m, 15m, 1h, 4h, and 1d** to identify cross-timeframe institutional alignment.")
+    
+    matrix_tickers_input = st.text_area("Watchlist Tickers:", value=DEFAULT_WATCHLIST).upper()
+    run_matrix_scan = st.button("Generate Matrix", type="primary")
+    
+    if run_matrix_scan:
+        ticker_list = [t.strip() for t in matrix_tickers_input.split(",") if t.strip()]
+        intervals = ['5m', '15m', '1h', '4h', '1d']
+        matrix_rows = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        total_operations = len(ticker_list) * len(intervals)
+        completed = 0
+        
+        for tick in ticker_list:
+            row_data = {"Ticker": tick, "Price": "N/A"}
+            bullish_count = 0
+            valid_intervals = 0
+            
+            for tf in intervals:
+                completed += 1
+                status_text.text(f"Evaluating {tick} on {tf} ({completed}/{total_operations})...")
+                progress_bar.progress(completed / total_operations)
+                
+                scanner = AlgoTradingScanner(ticker=tick, timeframe=tf, params=algo_params)
+                df = scanner.fetch_data(tick, tf)
+                
+                if df.empty or len(df) < 30:
+                    row_data[tf] = "No Data"
+                    continue
+                    
+                df = scanner.apply_indicators(df, tf)
+                latest = df.iloc[-1]
+                if row_data["Price"] == "N/A":
+                    row_data["Price"] = f"${latest['Close']:.2f}"
+                    
+                sig = scanner.get_signal(latest, is_intraday=(tf in ['5m', '15m']))
+                valid_intervals += 1
+                
+                if "BUY" in sig:
+                    row_data[tf] = "BUY 🟢"
+                    bullish_count += 1
+                elif "SELL" in sig:
+                    row_data[tf] = "SELL 🔴"
+                elif "CHOP" in sig:
+                    row_data[tf] = "CHOP 🟡"
+                else:
+                    trend = "Bullish" if latest['SMA_Fast'] > latest['SMA_Slow'] else "Bearish"
+                    row_data[tf] = f"Trend { '🟢' if trend == 'Bullish' else '🔴' }"
+                    if trend == "Bullish": bullish_count += 0.5
+            
+            confluence_pct = int((bullish_count / valid_intervals) * 100) if valid_intervals > 0 else 0
+            if confluence_pct >= 80:
+                confluence_badge = f"Strong Bull ({confluence_pct}%) 🚀"
+            elif confluence_pct >= 50:
+                confluence_badge = f"Moderate Bull ({confluence_pct}%) 🟢"
+            else:
+                confluence_badge = f"Neutral / Bear ({confluence_pct}%) ⚪"
+                
+            row_data["Confluence Score"] = confluence_badge
+            matrix_rows.append(row_data)
+            
+        status_text.text("Matrix Assembly Complete!")
+        st.markdown("---")
+        
+        matrix_df = pd.DataFrame(matrix_rows)
+        st.dataframe(matrix_df, use_container_width=True, hide_index=True)
+        st.caption("Confluence Score calculates bullish alignment across all 5 monitored timeframes simultaneously.")
