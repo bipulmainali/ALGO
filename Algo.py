@@ -1,3 +1,4 @@
+
 """
 BM's Trading Algo — revised, research-oriented stock scanner.
 
@@ -10,10 +11,8 @@ Important:
 
 from __future__ import annotations
 
-import math
-import time
 import warnings
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -33,15 +32,11 @@ DEFAULT_WATCHLIST = (
 TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1wk"]
 MATRIX_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 
-st.set_page_config(
-    page_title=APP_TITLE,
-    layout="wide",
-    initial_sidebar_state="auto",
-)
+st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="auto")
 st.title("📈 BM's Trading Algo")
 st.caption(
-    "Rule-based screening, trade planning, and historical research "
-    "— not a trade execution system."
+    "Rule-based screening, trade planning, and historical research — "
+    "not a trade execution system."
 )
 
 
@@ -74,21 +69,15 @@ def download_ohlcv(ticker: str, interval: str, period: str) -> pd.DataFrame:
     if isinstance(raw.columns, pd.MultiIndex):
         chosen_level = None
         for level in range(raw.columns.nlevels):
-            vals = {
-                str(v).lower()
-                for v in raw.columns.get_level_values(level)
-            }
+            vals = {str(v).lower() for v in raw.columns.get_level_values(level)}
             if {"open", "high", "low", "close"}.issubset(vals):
                 chosen_level = level
                 break
-
         if chosen_level is None:
             return pd.DataFrame()
-
         raw.columns = raw.columns.get_level_values(chosen_level)
 
     raw.columns = [str(c).title() for c in raw.columns]
-
     required = ["Open", "High", "Low", "Close", "Volume"]
     if not set(required).issubset(raw.columns):
         return pd.DataFrame()
@@ -108,20 +97,14 @@ def download_ohlcv(ticker: str, interval: str, period: str) -> pd.DataFrame:
     for col in required:
         raw[col] = pd.to_numeric(raw[col], errors="coerce")
 
-    raw = raw.replace([np.inf, -np.inf], np.nan).dropna(
-        subset=required
-    )
-    raw = raw[
-        (raw["High"] >= raw["Low"]) &
-        (raw["Volume"] >= 0)
-    ]
-
+    raw = raw.replace([np.inf, -np.inf], np.nan).dropna(subset=required)
+    raw = raw[(raw["High"] >= raw["Low"]) & (raw["Volume"] >= 0)]
     return raw
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def download_vix(period: str = "2y") -> pd.Series:
-    """Download and normalize daily VIX closing values."""
+    """Download daily VIX closes and normalize dates."""
     try:
         raw = yf.download(
             "^VIX",
@@ -143,7 +126,6 @@ def download_vix(period: str = "2y") -> pd.Series:
             return pd.Series(dtype=float)
 
         idx = pd.DatetimeIndex(raw.index)
-
         if idx.tz is not None:
             idx = idx.tz_convert(NY).tz_localize(None)
 
@@ -151,10 +133,8 @@ def download_vix(period: str = "2y") -> pd.Series:
             pd.to_numeric(raw["Close"], errors="coerce").to_numpy(),
             index=idx,
         )
-
         s.index = s.index.normalize()
         s = s[~s.index.duplicated(keep="last")].dropna().sort_index()
-
         return s
 
     except Exception:
@@ -165,10 +145,7 @@ def is_intraday_tf(tf: str) -> bool:
     return tf in ("5m", "15m", "1h", "4h")
 
 
-def filter_unclosed_candles(
-    df: pd.DataFrame,
-    tf: str,
-) -> pd.DataFrame:
+def filter_unclosed_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     """Conservatively remove the currently forming bar where identifiable."""
     if df.empty:
         return df
@@ -177,13 +154,7 @@ def filter_unclosed_candles(
     out = df.copy()
 
     if tf in ("5m", "15m", "1h", "4h"):
-        durations = {
-            "5m": 5,
-            "15m": 15,
-            "1h": 60,
-            "4h": 240,
-        }
-
+        durations = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
         mins = durations[tf]
         last_ts = pd.Timestamp(out.index[-1])
 
@@ -193,7 +164,6 @@ def filter_unclosed_candles(
             session_close,
         )
 
-        # If timestamp is outside regular hours, use nominal duration.
         if last_ts.time() >= dt_time(16, 0):
             expected_end = last_ts + pd.Timedelta(minutes=mins)
 
@@ -209,62 +179,40 @@ def filter_unclosed_candles(
 
     elif tf == "1wk":
         last_ts = pd.Timestamp(out.index[-1])
-
         bar_week_monday = (
-            last_ts.normalize() -
-            pd.Timedelta(days=last_ts.weekday())
+            last_ts.normalize() - pd.Timedelta(days=last_ts.weekday())
         )
-
         current_week_monday = (
-            pd.Timestamp(now.date()).normalize() -
-            pd.Timedelta(days=now.weekday())
+            pd.Timestamp(now.date()).normalize()
+            - pd.Timedelta(days=now.weekday())
         )
-
         friday_close = (
-            current_week_monday +
-            pd.Timedelta(days=4, hours=16, minutes=10)
+            current_week_monday
+            + pd.Timedelta(days=4, hours=16, minutes=10)
         )
 
-        if (
-            bar_week_monday >= current_week_monday
-            and now < friday_close
-        ):
+        if bar_week_monday >= current_week_monday and now < friday_close:
             out = out.iloc[:-1]
 
     return out
 
 
-def resample_4h_regular_session(
-    hourly: pd.DataFrame,
-) -> pd.DataFrame:
+def resample_4h_regular_session(hourly: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregate hourly regular-session bars into session-anchored 4-hour groups.
-    Grouping is anchored to 09:30 ET and never combines bars from different dates.
+    Groups do not combine bars from different dates.
     """
     if hourly.empty:
         return hourly
 
     df = hourly.copy()
     idx = pd.DatetimeIndex(df.index)
-
     df["_date"] = idx.date
 
-    minutes_from_open = (
-        (idx.hour * 60 + idx.minute) -
-        (9 * 60 + 30)
-    )
+    minutes_from_open = (idx.hour * 60 + idx.minute) - (9 * 60 + 30)
+    df["_bucket"] = np.floor_divide(np.maximum(minutes_from_open, 0), 240)
 
-    df["_bucket"] = np.floor_divide(
-        np.maximum(minutes_from_open, 0),
-        240,
-    )
-
-    # Ignore timestamps outside regular session.
-    regular = (
-        (minutes_from_open >= 0) &
-        (minutes_from_open < 390)
-    )
-
+    regular = (minutes_from_open >= 0) & (minutes_from_open < 390)
     df = df.loc[regular]
 
     if df.empty:
@@ -273,7 +221,6 @@ def resample_4h_regular_session(
         )
 
     grouped = df.groupby(["_date", "_bucket"], sort=True)
-
     out = grouped.agg(
         Open=("Open", "first"),
         High=("High", "max"),
@@ -282,22 +229,17 @@ def resample_4h_regular_session(
         Volume=("Volume", "sum"),
     )
 
-    # Use the timestamp of the first constituent bar.
-    first_idx = df.groupby(
-        ["_date", "_bucket"],
-        sort=True,
-    ).apply(lambda x: x.index[0])
-
+    first_idx = df.groupby(["_date", "_bucket"], sort=True).apply(
+        lambda x: x.index[0]
+    )
     out.index = pd.DatetimeIndex(
         [pd.Timestamp(v) for v in first_idx.to_list()]
     )
     out.index.name = "Datetime"
-
     return out.sort_index()
 
 
 def get_price_data(ticker: str, tf: str) -> pd.DataFrame:
-    """Retrieve price data, resample when needed, and attach prior VIX data."""
     settings = {
         "5m": ("5m", "60d"),
         "15m": ("15m", "60d"),
@@ -322,35 +264,70 @@ def get_price_data(ticker: str, tf: str) -> pd.DataFrame:
         return data
 
     # Use only the previous completed daily VIX close.
-    # Do not backfill missing VIX observations from the future.
+    # Do not use a VIX observation from the future.
     vix = download_vix()
 
     if not vix.empty:
         vix_available = vix.copy()
+        vix_available.index = pd.DatetimeIndex(vix_available.index)
+
+        if vix_available.index.tz is not None:
+            vix_available.index = (
+                vix_available.index.tz_convert(NY).tz_localize(None)
+            )
+
+        # Make the observation available from the following calendar day.
         vix_available.index = (
-            vix_available.index + pd.Timedelta(days=1)
+            vix_available.index.normalize() + pd.Timedelta(days=1)
         )
 
-        left = pd.DataFrame({
-            "_date": pd.DatetimeIndex(data.index).normalize(),
-            "_order": np.arange(len(data)),
-        })
+        # FIX: merge_asof requires exactly matching merge-key dtypes.
+        # Normalize both sides to timezone-naive datetime64[ns].
+        price_idx = pd.DatetimeIndex(data.index)
 
-        right = pd.DataFrame({
-            "_date": vix_available.index,
-            "VIX": vix_available.to_numpy(),
-        }).sort_values("_date")
+        if price_idx.tz is not None:
+            price_idx = price_idx.tz_convert(NY).tz_localize(None)
+
+        left = pd.DataFrame(
+            {
+                "_date": pd.to_datetime(price_idx.normalize()),
+                "_order": np.arange(len(data), dtype=np.int64),
+            }
+        )
+
+        right = pd.DataFrame(
+            {
+                "_date": pd.to_datetime(
+                    pd.DatetimeIndex(vix_available.index)
+                ),
+                "VIX": pd.to_numeric(
+                    vix_available.to_numpy(),
+                    errors="coerce",
+                ),
+            }
+        )
+
+        left = left.dropna(subset=["_date"]).copy()
+        right = right.dropna(subset=["_date", "VIX"]).copy()
+
+        left["_date"] = left["_date"].astype("datetime64[ns]")
+        right["_date"] = right["_date"].astype("datetime64[ns]")
+
+        left = left.sort_values("_date", kind="mergesort")
+        right = right.sort_values("_date", kind="mergesort")
 
         merged = pd.merge_asof(
-            left.sort_values("_date"),
+            left,
             right,
             on="_date",
             direction="backward",
+            allow_exact_matches=True,
         )
 
-        data["VIX"] = (
-            merged.sort_values("_order")["VIX"].to_numpy()
-        )
+        vix_by_order = merged.set_index("_order")["VIX"]
+        data["VIX"] = vix_by_order.reindex(
+            np.arange(len(data))
+        ).to_numpy()
 
     else:
         data["VIX"] = np.nan
@@ -359,7 +336,7 @@ def get_price_data(ticker: str, tf: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Indicator calculations (pandas/numpy only; no pandas-ta or SciPy dependency)
+# Indicator calculations — pandas/numpy only; no SciPy dependency
 # ---------------------------------------------------------------------------
 
 def ema(series: pd.Series, length: int) -> pd.Series:
@@ -399,14 +376,8 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     result = 100 - (100 / (1 + rs))
 
-    result = result.mask(
-        (avg_loss == 0) & (avg_gain > 0),
-        100,
-    )
-    result = result.mask(
-        (avg_gain == 0) & (avg_loss > 0),
-        0,
-    )
+    result = result.mask((avg_loss == 0) & (avg_gain > 0), 100)
+    result = result.mask((avg_gain == 0) & (avg_loss > 0), 0)
 
     return result
 
@@ -456,29 +427,29 @@ def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
     atr_smooth = tr.replace(0, np.nan)
 
     plus_di = (
-        100 *
-        plus_dm.ewm(
+        100
+        * plus_dm.ewm(
             alpha=1 / length,
             min_periods=length,
             adjust=False,
-        ).mean() /
-        atr_smooth
+        ).mean()
+        / atr_smooth
     )
 
     minus_di = (
-        100 *
-        minus_dm.ewm(
+        100
+        * minus_dm.ewm(
             alpha=1 / length,
             min_periods=length,
             adjust=False,
-        ).mean() /
-        atr_smooth
+        ).mean()
+        / atr_smooth
     )
 
     dx = (
-        100 *
-        (plus_di - minus_di).abs() /
-        (plus_di + minus_di).replace(0, np.nan)
+        100
+        * (plus_di - minus_di).abs()
+        / (plus_di + minus_di).replace(0, np.nan)
     )
 
     return dx.ewm(
@@ -496,21 +467,20 @@ def add_indicators(
     out = df.copy()
 
     out["ATR"] = atr(out, p["atr_len"])
-    out["ATR_Pct"] = 100 * out["ATR"] / out["Close"].replace(0, np.nan)
+    out["ATR_Pct"] = (
+        100 * out["ATR"] / out["Close"].replace(0, np.nan)
+    )
     out["RSI"] = rsi(out["Close"], p["rsi_len"])
 
     out["SMA_Fast"] = sma(out["Close"], p["sma_fast"])
     out["SMA_Slow"] = sma(out["Close"], p["sma_slow"])
-
     out["EMA_Fast"] = ema(out["Close"], p["ema_fast"])
     out["EMA_Slow"] = ema(out["Close"], p["ema_slow"])
 
     out["Vol_SMA"] = sma(out["Volume"], p["rvol_len"])
     out["RVOL"] = (
-        out["Volume"] /
-        out["Vol_SMA"].replace(0, np.nan)
+        out["Volume"] / out["Vol_SMA"].replace(0, np.nan)
     )
-
     out["ADX"] = adx(out, p["adx_len"])
 
     bb_mid = sma(out["Close"], p["bb_len"])
@@ -532,25 +502,15 @@ def add_indicators(
     out["MACD_Signal"] = macd_signal
     out["MACD_Hist"] = macd_line - macd_signal
 
-    # Session VWAP resets each calendar day.
+    # Intraday VWAP resets each calendar day.
     typical = (out["High"] + out["Low"] + out["Close"]) / 3
 
     if tf in ("5m", "15m", "1h", "4h"):
         dates = pd.DatetimeIndex(out.index).normalize()
-
-        cum_pv = (
-            (typical * out["Volume"])
-            .groupby(dates)
-            .cumsum()
-        )
-
+        cum_pv = (typical * out["Volume"]).groupby(dates).cumsum()
         cum_vol = (
-            out["Volume"]
-            .groupby(dates)
-            .cumsum()
-            .replace(0, np.nan)
+            out["Volume"].groupby(dates).cumsum().replace(0, np.nan)
         )
-
         out["VWAP"] = cum_pv / cum_vol
     else:
         out["VWAP"] = np.nan
@@ -559,6 +519,8 @@ def add_indicators(
     out["Trend_Down"] = out["SMA_Fast"] < out["SMA_Slow"]
 
     return out.replace([np.inf, -np.inf], np.nan)
+
+
 # ---------------------------------------------------------------------------
 # Strategy, structural levels, and trade plans
 # ---------------------------------------------------------------------------
@@ -577,8 +539,7 @@ class TradingScanner:
         self.vix_max = vix_max
 
         self.is_index = self.ticker in {
-            "SPY", "QQQ", "DIA", "IWM",
-            "SPX", "NDX", "^GSPC", "^NDX",
+            "SPY", "QQQ", "DIA", "IWM", "SPX", "NDX", "^GSPC", "^NDX"
         }
 
     def signal(
@@ -590,8 +551,8 @@ class TradingScanner:
 
         required = [
             "Close", "ATR", "RSI", "ADX", "RVOL",
-            "BB_Upper", "BB_Lower", "SMA_Fast",
-            "SMA_Slow", "MACD_Hist",
+            "BB_Upper", "BB_Lower", "SMA_Fast", "SMA_Slow",
+            "MACD_Hist",
         ]
 
         if tf in ("5m", "15m"):
@@ -623,36 +584,23 @@ class TradingScanner:
                 row["EMA_Fast"] > row["EMA_Slow"]
                 and row["Close"] > row["VWAP"]
             )
-
             down = (
                 row["EMA_Fast"] < row["EMA_Slow"]
                 and row["Close"] < row["VWAP"]
             )
 
             long_momentum = (
-                self.p["rsi_os"] <= row["RSI"]
-                <= self.p["rsi_ob"]
+                self.p["rsi_os"] <= row["RSI"] <= self.p["rsi_ob"]
             )
-
-            short_momentum = (
-                row["RSI"] >= self.p["short_rsi_min"]
-            )
+            short_momentum = row["RSI"] >= self.p["short_rsi_min"]
 
             buy = (
-                up
-                and long_momentum
-                and trending
-                and volume_ok
-                and not_chasing
-                and vix_ok
+                up and long_momentum and trending
+                and volume_ok and not_chasing and vix_ok
             )
-
             sell = (
-                down
-                and short_momentum
-                and trending
-                and volume_ok
-                and not_panic_selling
+                down and short_momentum and trending
+                and volume_ok and not_panic_selling
             )
 
         else:
@@ -660,47 +608,35 @@ class TradingScanner:
             down = row["SMA_Fast"] < row["SMA_Slow"]
 
             long_momentum = (
-                self.p["swing_rsi_min"] <= row["RSI"]
+                self.p["swing_rsi_min"]
+                <= row["RSI"]
                 <= self.p["rsi_os"]
             )
-
-            short_momentum = (
-                row["RSI"] >= self.p["short_rsi_min"]
-            )
+            short_momentum = row["RSI"] >= self.p["short_rsi_min"]
 
             buy = (
-                up
-                and long_momentum
+                up and long_momentum
                 and row["MACD_Hist"] > 0
-                and trending
-                and volume_ok
-                and not_chasing
-                and vix_ok
+                and trending and volume_ok
+                and not_chasing and vix_ok
             )
-
             sell = (
-                down
-                and short_momentum
+                down and short_momentum
                 and row["MACD_Hist"] < 0
-                and trending
-                and not_panic_selling
+                and trending and not_panic_selling
             )
 
         if buy:
             return {
                 "action": "BUY",
-                "reason": (
-                    "Trend, momentum, regime, volume, "
-                    "and price filters pass."
-                ),
+                "reason": "Trend, momentum, regime, volume, and price filters pass.",
             }
 
         if sell:
             return {
                 "action": "SELL / AVOID",
                 "reason": (
-                    "Bearish conditions; this is not a "
-                    "short-entry recommendation."
+                    "Bearish conditions; this is not a short-entry recommendation."
                 ),
             }
 
@@ -713,17 +649,14 @@ class TradingScanner:
         if not volume_ok:
             return {
                 "action": "WAIT",
-                "reason": (
-                    f"RVOL below {self.p['rvol_min']:.2f}."
-                ),
+                "reason": f"RVOL below {self.p['rvol_min']:.2f}.",
             }
 
         if not vix_ok:
             return {
                 "action": "WAIT — HIGH VIX",
                 "reason": (
-                    f"Previous completed VIX close is at/above "
-                    f"{self.vix_max}."
+                    f"Previous completed VIX close is at/above {self.vix_max}."
                 ),
             }
 
@@ -744,11 +677,8 @@ class TradingScanner:
 
         close = df["Close"].tail(lookback).to_numpy(dtype=float)
         current = close[-1]
+        supports, resistances = [], []
 
-        supports = []
-        resistances = []
-
-        # A pivot is confirmed only after `order` bars to its right exist.
         for i in range(order, len(close) - order):
             window = close[i - order:i + order + 1]
 
@@ -766,28 +696,18 @@ class TradingScanner:
             ):
                 supports.append(float(close[i]))
 
-        # De-duplicate levels that are within 0.2% of one another.
         def dedupe(values):
             result = []
-
             for value in sorted(values):
                 if (
                     not result
-                    or abs(value - result[-1])
-                    / max(abs(value), 1e-9) > 0.002
+                    or abs(value - result[-1]) / max(abs(value), 1e-9) > 0.002
                 ):
                     result.append(value)
-
             return result
 
-        supports = sorted(
-            dedupe(supports),
-            reverse=True,
-        )[:3]
-
-        resistances = sorted(
-            dedupe(resistances)
-        )[:3]
+        supports = sorted(dedupe(supports), reverse=True)[:3]
+        resistances = sorted(dedupe(resistances))[:3]
 
         return supports, resistances
 
@@ -806,57 +726,38 @@ class TradingScanner:
 
         sl_mult = (
             self.p["intraday_sl_atr"]
-            if is_intraday
-            else self.p["swing_sl_atr"]
+            if is_intraday else self.p["swing_sl_atr"]
         )
-
         tp_mult = (
             self.p["intraday_tp_atr"]
-            if is_intraday
-            else self.p["swing_tp_atr"]
+            if is_intraday else self.p["swing_tp_atr"]
         )
 
         stop = price - sl_mult * atr_value
         target = price + tp_mult * atr_value
-
-        # Add estimated entry slippage.
         entry = price * (1 + slippage_bps / 10000)
-        stop_distance = max(entry - stop, 0)
 
+        stop_distance = max(entry - stop, 0)
         risk_dollars = account_equity * risk_pct / 100
 
         shares_risk = (
             int(risk_dollars / stop_distance)
-            if stop_distance > 0
-            else 0
+            if stop_distance > 0 else 0
         )
-
         shares_cap = (
-            int(
-                (account_equity * max_position_pct / 100)
-                / entry
-            )
-            if entry > 0
-            else 0
+            int((account_equity * max_position_pct / 100) / entry)
+            if entry > 0 else 0
         )
-
-        shares = max(
-            0,
-            min(shares_risk, shares_cap),
-        )
+        shares = max(0, min(shares_risk, shares_cap))
 
         pullback = next(
-            (
-                s for s in supports
-                if s < price and s > stop
-            ),
+            (s for s in supports if s < price and s > stop),
             np.nan,
         )
 
         rr = (
             (target - entry) / stop_distance
-            if stop_distance > 0
-            else np.nan
+            if stop_distance > 0 else np.nan
         )
 
         return {
@@ -864,12 +765,8 @@ class TradingScanner:
             "entry": entry,
             "stop": stop,
             "target": target,
-            "tp2": price + (
-                4.0 if not is_intraday else 2.0
-            ) * atr_value,
-            "tp3": price + (
-                6.0 if not is_intraday else 3.0
-            ) * atr_value,
+            "tp2": price + (4.0 if not is_intraday else 2.0) * atr_value,
+            "tp3": price + (6.0 if not is_intraday else 3.0) * atr_value,
             "pullback": pullback,
             "risk_dollars": risk_dollars,
             "shares": shares,
@@ -880,7 +777,7 @@ class TradingScanner:
 
 
 # ---------------------------------------------------------------------------
-# Backtest: long-only, next-bar open, one position per ticker at a time.
+# Backtest — long-only, next-bar open, one position at a time per ticker
 # ---------------------------------------------------------------------------
 
 def backtest_long_only(
@@ -893,23 +790,18 @@ def backtest_long_only(
 ) -> dict:
     trades = []
 
-    empty_result = {
-        "trades": pd.DataFrame(),
-        "setups": 0,
-        "closed": 0,
-        "wins": 0,
-        "losses": 0,
-        "win_rate": np.nan,
-        "profit_factor": np.nan,
-        "expectancy_r": np.nan,
-        "max_drawdown_pct": np.nan,
-    }
-
-    if df.empty or len(df) < max(
-        scanner.p["sma_slow"] + 10,
-        80,
-    ):
-        return empty_result
+    if df.empty or len(df) < max(scanner.p["sma_slow"] + 10, 80):
+        return {
+            "trades": pd.DataFrame(),
+            "setups": 0,
+            "closed": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": np.nan,
+            "profit_factor": np.nan,
+            "expectancy_r": np.nan,
+            "max_drawdown_pct": np.nan,
+        }
 
     i = max(scanner.p["sma_slow"], 50)
 
@@ -921,14 +813,13 @@ def backtest_long_only(
             i += 1
             continue
 
-        signal_index = i
+        setup_index = i
         entry_bar = i + 1
 
         entry = (
             float(df.iloc[entry_bar]["Open"])
             * (1 + slippage_bps / 10000)
         )
-
         atr_value = float(row["ATR"])
 
         if (
@@ -940,26 +831,18 @@ def backtest_long_only(
             continue
 
         is_intraday = tf in ("5m", "15m")
-
         sl_mult = (
             scanner.p["intraday_sl_atr"]
-            if is_intraday
-            else scanner.p["swing_sl_atr"]
+            if is_intraday else scanner.p["swing_sl_atr"]
         )
-
         tp_mult = (
             scanner.p["intraday_tp_atr"]
-            if is_intraday
-            else scanner.p["swing_tp_atr"]
+            if is_intraday else scanner.p["swing_tp_atr"]
         )
 
         stop = entry - sl_mult * atr_value
         target = entry + tp_mult * atr_value
-
-        last_bar = min(
-            len(df) - 1,
-            entry_bar + hold_bars - 1,
-        )
+        last_bar = min(len(df) - 1, entry_bar + hold_bars - 1)
 
         exit_price = None
         exit_index = last_bar
@@ -967,32 +850,23 @@ def backtest_long_only(
 
         for j in range(entry_bar, last_bar + 1):
             bar = df.iloc[j]
-
             hit_stop = float(bar["Low"]) <= stop
             hit_target = float(bar["High"]) >= target
 
             if hit_stop and hit_target:
-                # OHLC bars cannot reveal which occurred first.
-                # Assume the stop was hit first.
-                exit_price = stop * (
-                    1 - slippage_bps / 10000
-                )
+                exit_price = stop * (1 - slippage_bps / 10000)
                 exit_index = j
                 exit_reason = "STOP (both touched; conservative)"
                 break
 
             if hit_stop:
-                exit_price = stop * (
-                    1 - slippage_bps / 10000
-                )
+                exit_price = stop * (1 - slippage_bps / 10000)
                 exit_index = j
                 exit_reason = "STOP"
                 break
 
             if hit_target:
-                exit_price = target * (
-                    1 - slippage_bps / 10000
-                )
+                exit_price = target * (1 - slippage_bps / 10000)
                 exit_index = j
                 exit_reason = "TARGET"
                 break
@@ -1007,43 +881,51 @@ def backtest_long_only(
         gross = (exit_price - entry) * shares
         costs = 2 * commission_per_share * shares
         net = gross - costs
+        initial_risk = max(entry - stop, 1e-9) * shares + costs
 
-        initial_risk = (
-            max(entry - stop, 1e-9) * shares + costs
+        trades.append(
+            {
+                "Signal Time": df.index[setup_index],
+                "Entry Time": df.index[entry_bar],
+                "Exit Time": df.index[exit_index],
+                "Entry": entry,
+                "Stop": stop,
+                "Target": target,
+                "Exit": exit_price,
+                "Exit Reason": exit_reason,
+                "Net P/L per Share": net,
+                "R Multiple": net / initial_risk,
+                "Win": net > 0,
+                "Bars Held": exit_index - entry_bar + 1,
+            }
         )
 
-        trades.append({
-            "Signal Time": df.index[signal_index],
-            "Entry Time": df.index[entry_bar],
-            "Exit Time": df.index[exit_index],
-            "Entry": entry,
-            "Stop": stop,
-            "Target": target,
-            "Exit": exit_price,
-            "Exit Reason": exit_reason,
-            "Net P/L per Share": net,
-            "R Multiple": net / initial_risk,
-            "Win": net > 0,
-            "Bars Held": exit_index - entry_bar + 1,
-        })
-
-        # Prevent overlapping positions for this ticker.
+        # Prevent overlapping positions for the same ticker.
         i = exit_index + 1
 
-    trade_df = pd.DataFrame(trades)
+    tdf = pd.DataFrame(trades)
 
-    if trade_df.empty:
-        return empty_result
+    if tdf.empty:
+        return {
+            "trades": tdf,
+            "setups": 0,
+            "closed": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": np.nan,
+            "profit_factor": np.nan,
+            "expectancy_r": np.nan,
+            "max_drawdown_pct": np.nan,
+        }
 
-    pnl = trade_df["Net P/L per Share"].astype(float)
-
+    pnl = tdf["Net P/L per Share"].astype(float)
     wins = int((pnl > 0).sum())
     losses = int((pnl <= 0).sum())
 
     gross_profit = float(pnl[pnl > 0].sum())
     gross_loss = abs(float(pnl[pnl < 0].sum()))
 
-    profit_factor = (
+    pf = (
         gross_profit / gross_loss
         if gross_loss > 0
         else (np.inf if gross_profit > 0 else np.nan)
@@ -1052,57 +934,48 @@ def backtest_long_only(
     equity = pnl.cumsum()
     peak = equity.cummax()
     drawdown = equity - peak
-    max_drawdown = float(drawdown.min())
+    max_dd = float(drawdown.min())
 
     return {
-        "trades": trade_df,
-        "setups": len(trade_df),
-        "closed": len(trade_df),
+        "trades": tdf,
+        "setups": len(tdf),
+        "closed": len(tdf),
         "wins": wins,
         "losses": losses,
-        "win_rate": 100 * wins / len(trade_df),
-        "profit_factor": profit_factor,
-        "expectancy_r": float(
-            trade_df["R Multiple"].mean()
-        ),
-        # This is cumulative P/L per share, NOT account drawdown %.
-        "max_drawdown_pct": max_drawdown,
+        "win_rate": 100 * wins / len(tdf),
+        "profit_factor": pf,
+        "expectancy_r": float(tdf["R Multiple"].mean()),
+        "max_drawdown_pct": max_dd,
     }
+
+
 # ---------------------------------------------------------------------------
 # UI helpers
 # ---------------------------------------------------------------------------
 
 def format_money(x):
-    if x is None or not np.isfinite(x):
-        return "N/A"
-    return f"${x:,.2f}"
+    return "N/A" if x is None or not np.isfinite(x) else f"${x:,.2f}"
 
 
-def safe_indicator_row(
-    df: pd.DataFrame,
-) -> pd.Series | None:
+def safe_indicator_row(df: pd.DataFrame) -> pd.Series | None:
     if df.empty:
         return None
 
     required = [
-        "Close", "ATR", "RSI", "ADX", "RVOL",
-        "SMA_Fast", "SMA_Slow", "BB_Upper",
-        "BB_Lower", "MACD_Hist",
+        "Close", "ATR", "RSI", "ADX", "RVOL", "SMA_Fast",
+        "SMA_Slow", "BB_Upper", "BB_Lower", "MACD_Hist",
     ]
 
     if any(c not in df.columns for c in required):
         return None
 
-    valid = (
-        df[required]
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna()
+    valid = df[required].replace([np.inf, -np.inf], np.nan).dropna()
+
+    return (
+        valid.iloc[-1]
+        if not valid.empty and valid.index[-1] == df.index[-1]
+        else None
     )
-
-    if not valid.empty and valid.index[-1] == df.index[-1]:
-        return valid.iloc[-1]
-
-    return None
 
 
 def make_params() -> dict:
@@ -1117,150 +990,87 @@ def make_params() -> dict:
 
         p = {
             "ema_fast": int(st.number_input(
-                "Fast EMA",
-                min_value=2,
-                max_value=50,
-                value=9,
+                "Fast EMA", min_value=2, max_value=50, value=9
             )),
             "ema_slow": int(st.number_input(
-                "Slow EMA",
-                min_value=3,
-                max_value=100,
-                value=21,
+                "Slow EMA", min_value=3, max_value=100, value=21
             )),
             "sma_fast": int(st.number_input(
-                "Fast SMA",
-                min_value=5,
-                max_value=150,
-                value=50,
+                "Fast SMA", min_value=5, max_value=150, value=50
             )),
             "sma_slow": int(st.number_input(
-                "Slow SMA",
-                min_value=20,
-                max_value=400,
-                value=200,
+                "Slow SMA", min_value=20, max_value=400, value=200
             )),
             "rsi_len": int(st.number_input(
-                "RSI Length",
-                min_value=2,
-                max_value=50,
-                value=14,
+                "RSI Length", min_value=2, max_value=50, value=14
             )),
             "rsi_os": float(st.number_input(
                 "RSI Pullback Ceiling",
-                min_value=20.0,
-                max_value=70.0,
-                value=50.0,
-                step=1.0,
+                min_value=20.0, max_value=70.0, value=50.0, step=1.0
             )),
             "rsi_ob": float(st.number_input(
                 "Intraday RSI Upper Bound",
-                min_value=40.0,
-                max_value=90.0,
-                value=65.0,
-                step=1.0,
+                min_value=40.0, max_value=90.0, value=65.0, step=1.0
             )),
             "swing_rsi_min": float(st.number_input(
                 "Swing RSI Lower Bound",
-                min_value=10.0,
-                max_value=60.0,
-                value=35.0,
-                step=1.0,
+                min_value=10.0, max_value=60.0, value=35.0, step=1.0
             )),
             "short_rsi_min": float(st.number_input(
                 "Bearish RSI Minimum",
-                min_value=35.0,
-                max_value=80.0,
-                value=50.0,
-                step=1.0,
+                min_value=35.0, max_value=80.0, value=50.0, step=1.0
             )),
             "adx_thresh": float(st.number_input(
                 "Minimum ADX",
-                min_value=5.0,
-                max_value=50.0,
-                value=20.0,
-                step=1.0,
+                min_value=5.0, max_value=50.0, value=20.0, step=1.0
             )),
             "adx_len": int(st.number_input(
-                "ADX Length",
-                min_value=5,
-                max_value=40,
-                value=14,
+                "ADX Length", min_value=5, max_value=40, value=14
             )),
             "rvol_len": int(st.number_input(
-                "RVOL Average Length",
-                min_value=5,
-                max_value=100,
-                value=20,
+                "RVOL Average Length", min_value=5, max_value=100, value=20
             )),
             "rvol_min": float(st.number_input(
                 "Minimum RVOL",
-                min_value=0.2,
-                max_value=5.0,
-                value=1.0,
-                step=0.1,
+                min_value=0.2, max_value=5.0, value=1.0, step=0.1
             )),
             "bb_len": int(st.number_input(
-                "Bollinger Length",
-                min_value=5,
-                max_value=100,
-                value=20,
+                "Bollinger Length", min_value=5, max_value=100, value=20
             )),
             "bb_std": float(st.number_input(
                 "Bollinger Standard Deviations",
-                min_value=1.0,
-                max_value=4.0,
-                value=2.0,
-                step=0.25,
+                min_value=1.0, max_value=4.0, value=2.0, step=0.25
             )),
             "atr_len": int(st.number_input(
-                "ATR Length",
-                min_value=5,
-                max_value=50,
-                value=14,
+                "ATR Length", min_value=5, max_value=50, value=14
             )),
             "intraday_sl_atr": float(st.number_input(
                 "Intraday Stop (ATR)",
-                min_value=0.5,
-                max_value=5.0,
-                value=1.5,
-                step=0.25,
+                min_value=0.5, max_value=5.0, value=1.5, step=0.25
             )),
             "intraday_tp_atr": float(st.number_input(
                 "Intraday Target (ATR)",
-                min_value=0.5,
-                max_value=5.0,
-                value=1.0,
-                step=0.25,
+                min_value=0.5, max_value=5.0, value=1.0, step=0.25
             )),
             "swing_sl_atr": float(st.number_input(
                 "Swing Stop (ATR)",
-                min_value=0.5,
-                max_value=6.0,
-                value=2.0,
-                step=0.25,
+                min_value=0.5, max_value=6.0, value=2.0, step=0.25
             )),
             "swing_tp_atr": float(st.number_input(
                 "Swing Target (ATR)",
-                min_value=0.5,
-                max_value=10.0,
-                value=2.0,
-                step=0.5,
+                min_value=0.5, max_value=10.0, value=2.0, step=0.5
             )),
         }
 
-    # Ensure the fast averages are shorter than the slow averages.
     if p["ema_fast"] >= p["ema_slow"]:
         st.sidebar.warning(
-            "Fast EMA must be shorter than slow EMA. "
-            "Defaults are used for EMA lengths."
+            "Fast EMA must be shorter than slow EMA. Defaults are used for EMA lengths."
         )
         p["ema_fast"], p["ema_slow"] = 9, 21
 
     if p["sma_fast"] >= p["sma_slow"]:
         st.sidebar.warning(
-            "Fast SMA must be shorter than slow SMA. "
-            "Defaults are used for SMA lengths."
+            "Fast SMA must be shorter than slow SMA. Defaults are used for SMA lengths."
         )
         p["sma_fast"], p["sma_slow"] = 50, 200
 
@@ -1283,10 +1093,7 @@ def analyze_ticker(
             pd.DataFrame(),
             scanner,
             None,
-            {
-                "action": "NO DATA",
-                "reason": "No market data returned.",
-            },
+            {"action": "NO DATA", "reason": "No market data returned."},
         )
 
     indicators = add_indicators(raw, tf, p)
@@ -1299,9 +1106,7 @@ def analyze_ticker(
             None,
             {
                 "action": "INSUFFICIENT HISTORY",
-                "reason": (
-                    "Not enough completed candles for indicators."
-                ),
+                "reason": "Not enough completed candles for indicators.",
             },
         )
 
@@ -1309,7 +1114,7 @@ def analyze_ticker(
 
 
 # ---------------------------------------------------------------------------
-# Sidebar and shared settings
+# Sidebar and settings
 # ---------------------------------------------------------------------------
 
 st.sidebar.header("Terminal Navigation")
@@ -1393,34 +1198,23 @@ vix_max = float(st.sidebar.number_input(
 st.info(
     "Research use only. Signals are based on completed candles; "
     "data availability and freshness depend on Yahoo Finance. "
-    "Backtest results are hypothetical and do not include market "
-    "impact or guaranteed execution."
+    "Backtest results are hypothetical and do not include market impact "
+    "or guaranteed execution."
 )
 
 
 # ---------------------------------------------------------------------------
-# Mode 1 — Single ticker deep dive
+# Mode 1 — Single ticker deep-dive
 # ---------------------------------------------------------------------------
 
 if mode == "Single Ticker Deep-Dive":
-    ticker = st.sidebar.text_input(
-        "Ticker",
-        value="SPY",
-    ).strip().upper()
-
-    run = st.sidebar.button(
-        "Run Analysis",
-        type="primary",
-    )
+    ticker = st.sidebar.text_input("Ticker", value="SPY").strip().upper()
+    run = st.sidebar.button("Run Analysis", type="primary")
 
     if run:
-        with st.spinner(
-            f"Analyzing {ticker} ({selected_tf})..."
-        ):
+        with st.spinner(f"Analyzing {ticker} ({selected_tf})..."):
             df, scanner, latest, sig = analyze_ticker(
-                ticker,
-                selected_tf,
-                params,
+                ticker, selected_tf, params
             )
 
         if df.empty:
@@ -1431,52 +1225,27 @@ if mode == "Single Ticker Deep-Dive":
 
         elif latest is None:
             st.warning(sig["reason"])
-            st.write(
-                f"Downloaded/aggregated candles: {len(df)}"
-            )
+            st.write(f"Downloaded/aggregated candles: {len(df)}")
 
         else:
             price = float(latest["Close"])
             is_intraday = selected_tf in ("5m", "15m")
-
             supports, resistances = scanner.support_resistance(df)
             vix_value = latest.get("VIX", np.nan)
 
             cols = st.columns(6)
-
-            cols[0].metric(
-                "Last Completed Close",
-                format_money(price),
-            )
-            cols[1].metric(
-                "RSI",
-                f"{latest['RSI']:.1f}",
-            )
-            cols[2].metric(
-                "ADX",
-                f"{latest['ADX']:.1f}",
-            )
-            cols[3].metric(
-                "RVOL",
-                f"{latest['RVOL']:.2f}x",
-            )
-            cols[4].metric(
-                "ATR",
-                format_money(latest["ATR"]),
-            )
+            cols[0].metric("Last Completed Close", format_money(price))
+            cols[1].metric("RSI", f"{latest['RSI']:.1f}")
+            cols[2].metric("ADX", f"{latest['ADX']:.1f}")
+            cols[3].metric("RVOL", f"{latest['RVOL']:.2f}x")
+            cols[4].metric("ATR", format_money(latest["ATR"]))
             cols[5].metric(
                 "Prior VIX Close",
-                (
-                    f"{vix_value:.1f}"
-                    if np.isfinite(vix_value)
-                    else "Unavailable"
-                ),
+                f"{vix_value:.1f}" if np.isfinite(vix_value) else "Unavailable",
             )
 
             st.subheader("🤖 Signal & Trade Plan")
-            st.write(
-                f"**Signal:** {sig['action']} — {sig['reason']}"
-            )
+            st.write(f"**Signal:** {sig['action']} — {sig['reason']}")
 
             if sig["action"] == "BUY":
                 plan = scanner.trade_plan(
@@ -1490,68 +1259,44 @@ if mode == "Single Ticker Deep-Dive":
                 )
 
                 a, b, c = st.columns(3)
-
-                a.metric(
-                    "Estimated Entry",
-                    format_money(plan["entry"]),
-                )
-                b.metric(
-                    "Stop Loss",
-                    format_money(plan["stop"]),
-                )
-                c.metric(
-                    "Target 1",
-                    format_money(plan["target"]),
-                )
+                a.metric("Estimated Entry", format_money(plan["entry"]))
+                b.metric("Stop Loss", format_money(plan["stop"]))
+                c.metric("Target 1", format_money(plan["target"]))
 
                 d, e, f = st.columns(3)
-
                 d.metric(
                     "Pullback Level",
-                    (
-                        format_money(plan["pullback"])
-                        if np.isfinite(plan["pullback"])
-                        else "No valid level"
-                    ),
+                    format_money(plan["pullback"])
+                    if np.isfinite(plan["pullback"])
+                    else "No valid level",
                 )
-
-                e.metric(
-                    "Estimated Shares",
-                    f"{plan['shares']:,}",
-                )
-
-                f.metric(
-                    "Position Value",
-                    format_money(plan["position_value"]),
-                )
+                e.metric("Estimated Shares", f"{plan['shares']:,}")
+                f.metric("Position Value", format_money(plan["position_value"]))
 
                 st.caption(
                     f"Risk budget: ${plan['risk_dollars']:.2f}; "
                     f"estimated risk at stop: ${plan['risk_if_stop']:.2f}; "
                     f"target/stop ratio: {plan['rr']:.2f}R. "
-                    "Quantity is constrained by both risk and "
-                    "position-size limits."
+                    "Quantity is constrained by risk and position-size limits."
                 )
 
                 st.write(
-                    f"**Additional targets:** "
-                    f"TP2 {format_money(plan['tp2'])} · "
+                    f"**Additional targets:** TP2 {format_money(plan['tp2'])} · "
                     f"TP3 {format_money(plan['tp3'])}"
                 )
 
                 if not np.isfinite(plan["pullback"]):
                     st.caption(
-                        "No suitable confirmed swing-low pullback "
-                        "level above the proposed stop was detected."
+                        "No suitable confirmed swing-low pullback level above "
+                        "the proposed stop was detected."
                     )
 
             st.subheader("🧱 Confirmed Historical Levels")
-
             l, r = st.columns(2)
 
             l.write(
-                "**Support:** " +
-                (
+                "**Support:** "
+                + (
                     ", ".join(format_money(x) for x in supports)
                     if supports
                     else "No confirmed level detected"
@@ -1559,8 +1304,8 @@ if mode == "Single Ticker Deep-Dive":
             )
 
             r.write(
-                "**Resistance:** " +
-                (
+                "**Resistance:** "
+                + (
                     ", ".join(format_money(x) for x in resistances)
                     if resistances
                     else "No confirmed level detected"
@@ -1568,7 +1313,6 @@ if mode == "Single Ticker Deep-Dive":
             )
 
             st.subheader("🧪 Historical Backtest (Long-only)")
-
             bt = backtest_long_only(
                 df,
                 scanner,
@@ -1579,49 +1323,33 @@ if mode == "Single Ticker Deep-Dive":
             )
 
             if bt["closed"] == 0:
-                st.info(
-                    "No completed historical trades were generated "
-                    "for this timeframe and parameter combination."
+                st.warning(
+                    "No completed historical trades were generated, or there "
+                    "is insufficient history. This is not a 0% win rate."
                 )
 
             else:
-                bt_cols = st.columns(5)
-
-                bt_cols[0].metric(
-                    "Closed Trades",
-                    f"{bt['closed']}",
-                )
-
-                bt_cols[1].metric(
-                    "Win Rate",
-                    f"{bt['win_rate']:.1f}%",
-                )
-
-                bt_cols[2].metric(
+                m = st.columns(5)
+                m[0].metric("Closed Trades", f"{bt['closed']}")
+                m[1].metric("Win Rate", f"{bt['win_rate']:.1f}%")
+                m[2].metric(
                     "Profit Factor",
-                    (
-                        f"{bt['profit_factor']:.2f}"
-                        if np.isfinite(bt["profit_factor"])
-                        else "N/A"
-                    ),
+                    f"{bt['profit_factor']:.2f}"
+                    if np.isfinite(bt["profit_factor"])
+                    else "N/A",
                 )
-
-                bt_cols[3].metric(
-                    "Expectancy",
-                    f"{bt['expectancy_r']:.2f}R",
-                )
-
-                bt_cols[4].metric(
+                m[3].metric("Expectancy", f"{bt['expectancy_r']:.2f}R")
+                m[4].metric(
                     "Max Drawdown",
-                    format_money(bt["max_drawdown_pct"]),
+                    f"${bt['max_drawdown_pct']:.2f}/share",
                 )
 
                 st.caption(
-                    f"Backtest uses next-bar-open entries, a maximum "
-                    f"hold of {hold_bars} bars, slippage and commissions. "
-                    "If a bar touches stop and target, the stop is assumed "
-                    "first. Drawdown is cumulative P/L per share, not "
-                    "account-level drawdown. No short trades are tested."
+                    f"Backtest uses next-bar open entries, one position at a time, "
+                    f"a maximum hold of {hold_bars} bars, slippage and commissions. "
+                    "If a bar touches stop and target, the stop is assumed first. "
+                    "Drawdown is cumulative P/L per share, not account-level drawdown. "
+                    "No short trades are tested."
                 )
 
                 with st.expander("View historical trades"):
@@ -1631,80 +1359,87 @@ if mode == "Single Ticker Deep-Dive":
                         hide_index=True,
                     )
 
-            st.subheader(
-                f"Price Action — {ticker} ({selected_tf})"
-            )
+            st.subheader(f"Price Action — {ticker} ({selected_tf})")
 
             visible = (
-                250
-                if selected_tf in ("5m", "15m")
-                else 180
-                if selected_tf in ("1h", "4h")
+                250 if selected_tf in ("5m", "15m")
+                else 180 if selected_tf in ("1h", "4h")
                 else 120
             )
-
             chart = df.tail(visible)
             fig = go.Figure()
 
-            fig.add_trace(go.Candlestick(
-                x=chart.index,
-                open=chart["Open"],
-                high=chart["High"],
-                low=chart["Low"],
-                close=chart["Close"],
-                name=ticker,
-            ))
+            fig.add_trace(
+                go.Candlestick(
+                    x=chart.index,
+                    open=chart["Open"],
+                    high=chart["High"],
+                    low=chart["Low"],
+                    close=chart["Close"],
+                    name=ticker,
+                )
+            )
 
             if selected_tf in ("5m", "15m", "1h", "4h"):
-                fig.add_trace(go.Scatter(
-                    x=chart.index,
-                    y=chart["VWAP"],
-                    name="Session VWAP",
-                    line=dict(width=1.5, dash="dot"),
-                ))
-
-                fig.add_trace(go.Scatter(
-                    x=chart.index,
-                    y=chart["EMA_Fast"],
-                    name=f"{params['ema_fast']} EMA",
-                    line=dict(width=1.2),
-                ))
-
-                fig.add_trace(go.Scatter(
-                    x=chart.index,
-                    y=chart["EMA_Slow"],
-                    name=f"{params['ema_slow']} EMA",
-                    line=dict(width=1.2),
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart.index,
+                        y=chart["VWAP"],
+                        name="Session VWAP",
+                        line=dict(width=1.5, dash="dot"),
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart.index,
+                        y=chart["EMA_Fast"],
+                        name=f"{params['ema_fast']} EMA",
+                        line=dict(width=1.2),
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart.index,
+                        y=chart["EMA_Slow"],
+                        name=f"{params['ema_slow']} EMA",
+                        line=dict(width=1.2),
+                    )
+                )
 
             else:
-                fig.add_trace(go.Scatter(
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart.index,
+                        y=chart["SMA_Fast"],
+                        name=f"{params['sma_fast']} SMA",
+                        line=dict(width=1.4),
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart.index,
+                        y=chart["SMA_Slow"],
+                        name=f"{params['sma_slow']} SMA",
+                        line=dict(width=1.4),
+                    )
+                )
+
+            fig.add_trace(
+                go.Scatter(
                     x=chart.index,
-                    y=chart["SMA_Fast"],
-                    name=f"{params['sma_fast']} SMA",
-                    line=dict(width=1.4),
-                ))
-
-                fig.add_trace(go.Scatter(
+                    y=chart["BB_Upper"],
+                    name="Upper Bollinger",
+                    line=dict(width=1, dash="dash"),
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
                     x=chart.index,
-                    y=chart["SMA_Slow"],
-                    name=f"{params['sma_slow']} SMA",
-                    line=dict(width=1.4),
-                ))
-
-            fig.add_trace(go.Scatter(
-                x=chart.index,
-                y=chart["BB_Upper"],
-                name="Upper Bollinger",
-                line=dict(width=1, dash="dash"),
-            ))
-
-            fig.add_trace(go.Scatter(
-                x=chart.index,
-                y=chart["BB_Lower"],
-                name="Lower Bollinger",
-                line=dict(width=1, dash="dash"),
-            ))
+                    y=chart["BB_Lower"],
+                    name="Lower Bollinger",
+                    line=dict(width=1, dash="dash"),
+                )
+            )
 
             for level in supports:
                 fig.add_hline(
@@ -1730,38 +1465,33 @@ if mode == "Single Ticker Deep-Dive":
                 legend=dict(orientation="h"),
             )
 
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-            )
-
+            st.plotly_chart(fig, use_container_width=True)
             st.caption(
                 f"Last candle shown: {df.index[-1]}. "
                 "Prices are auto-adjusted Yahoo Finance history."
             )
+
+
 # ---------------------------------------------------------------------------
 # Mode 2 — Single timeframe watchlist scanner
 # ---------------------------------------------------------------------------
 
 elif mode == "Single-TF Watchlist Scanner":
     st.subheader(f"🔭 Watchlist Scanner ({selected_tf})")
-
     tickers_text = st.text_area(
         "Comma-separated ticker symbols",
         value=DEFAULT_WATCHLIST,
     )
-
-    scan = st.button(
-        "Scan Watchlist",
-        type="primary",
-    )
+    scan = st.button("Scan Watchlist", type="primary")
 
     if scan:
-        tickers = list(dict.fromkeys(
-            t.strip().upper()
-            for t in tickers_text.replace("\n", ",").split(",")
-            if t.strip()
-        ))
+        tickers = list(
+            dict.fromkeys(
+                t.strip().upper()
+                for t in tickers_text.replace("\n", ",").split(",")
+                if t.strip()
+            )
+        )
 
         if not tickers:
             st.warning("Enter at least one ticker.")
@@ -1777,9 +1507,7 @@ elif mode == "Single-TF Watchlist Scanner":
                 )
 
                 df, scanner, latest, sig = analyze_ticker(
-                    ticker,
-                    selected_tf,
-                    params,
+                    ticker, selected_tf, params
                 )
 
                 if latest is not None:
@@ -1807,38 +1535,39 @@ elif mode == "Single-TF Watchlist Scanner":
                             slippage_bps,
                         )
 
-                        row.update({
-                            "Entry": round(plan["entry"], 2),
-                            "Pullback": (
-                                round(plan["pullback"], 2)
-                                if np.isfinite(plan["pullback"])
-                                else np.nan
-                            ),
-                            "Stop": round(plan["stop"], 2),
-                            "Target": round(plan["target"], 2),
-                            "Shares": plan["shares"],
-                            "R:R": (
-                                round(plan["rr"], 2)
-                                if np.isfinite(plan["rr"])
-                                else np.nan
-                            ),
-                        })
+                        row.update(
+                            {
+                                "Entry": round(plan["entry"], 2),
+                                "Pullback": (
+                                    round(plan["pullback"], 2)
+                                    if np.isfinite(plan["pullback"])
+                                    else np.nan
+                                ),
+                                "Stop": round(plan["stop"], 2),
+                                "Target": round(plan["target"], 2),
+                                "Shares": plan["shares"],
+                                "R:R": (
+                                    round(plan["rr"], 2)
+                                    if np.isfinite(plan["rr"])
+                                    else np.nan
+                                ),
+                            }
+                        )
 
                     rows.append(row)
 
                 else:
-                    rows.append({
-                        "Ticker": ticker,
-                        "Signal": sig["action"],
-                        "Reason": sig["reason"],
-                    })
+                    rows.append(
+                        {
+                            "Ticker": ticker,
+                            "Signal": sig["action"],
+                            "Reason": sig["reason"],
+                        }
+                    )
 
-                progress.progress(
-                    (i + 1) / len(tickers)
-                )
+                progress.progress((i + 1) / len(tickers))
 
             status.success("Scan complete.")
-
             results = pd.DataFrame(rows)
 
             buys = (
@@ -1847,9 +1576,7 @@ elif mode == "Single-TF Watchlist Scanner":
                 else pd.DataFrame()
             )
 
-            st.subheader(
-                f"Qualified BUY Setups: {len(buys)}"
-            )
+            st.subheader(f"Qualified BUY Setups: {len(buys)}")
 
             if not buys.empty:
                 if "R:R" in buys:
@@ -1887,7 +1614,6 @@ elif mode == "Single-TF Watchlist Scanner":
 
 else:
     st.subheader("🌐 Multi-Timeframe Trend & Entry Matrix")
-
     st.caption(
         "Trend alignment and actionable entries are shown separately. "
         "Missing/insufficient intervals are not counted as bearish."
@@ -1898,18 +1624,16 @@ else:
         value=DEFAULT_WATCHLIST,
         key="matrix_tickers",
     )
-
-    scan = st.button(
-        "Generate Matrix",
-        type="primary",
-    )
+    scan = st.button("Generate Matrix", type="primary")
 
     if scan:
-        tickers = list(dict.fromkeys(
-            t.strip().upper()
-            for t in tickers_text.replace("\n", ",").split(",")
-            if t.strip()
-        ))
+        tickers = list(
+            dict.fromkeys(
+                t.strip().upper()
+                for t in tickers_text.replace("\n", ",").split(",")
+                if t.strip()
+            )
+        )
 
         if not tickers:
             st.warning("Enter at least one ticker.")
@@ -1918,16 +1642,11 @@ else:
             rows = []
             total = len(tickers) * len(MATRIX_TIMEFRAMES)
             done = 0
-
             progress = st.progress(0)
             status = st.empty()
 
             for ticker in tickers:
-                row = {
-                    "Ticker": ticker,
-                    "Price": np.nan,
-                }
-
+                row = {"Ticker": ticker, "Price": np.nan}
                 trend_points = 0.0
                 trend_weight = 0.0
                 entry_count = 0
@@ -1935,18 +1654,13 @@ else:
 
                 for tf in MATRIX_TIMEFRAMES:
                     done += 1
-
                     status.text(
-                        f"Evaluating {ticker} on {tf} "
-                        f"({done}/{total})"
+                        f"Evaluating {ticker} on {tf} ({done}/{total})"
                     )
-
                     progress.progress(done / total)
 
                     df, scanner, latest, sig = analyze_ticker(
-                        ticker,
-                        tf,
-                        params,
+                        ticker, tf, params
                     )
 
                     if latest is None:
@@ -1954,14 +1668,11 @@ else:
                         continue
 
                     if not np.isfinite(row["Price"]):
-                        row["Price"] = round(
-                            float(latest["Close"]),
-                            2,
-                        )
+                        row["Price"] = round(float(latest["Close"]), 2)
 
                     valid_count += 1
 
-                    # Higher timeframes have more weight for trend context.
+                    # Higher timeframes carry more trend-context weight.
                     weight = {
                         "5m": 1,
                         "15m": 1,
@@ -1973,7 +1684,6 @@ else:
                     trend_up = bool(
                         latest["SMA_Fast"] > latest["SMA_Slow"]
                     )
-
                     trend_down = bool(
                         latest["SMA_Fast"] < latest["SMA_Slow"]
                     )
@@ -1995,25 +1705,18 @@ else:
 
                     else:
                         trend_label = (
-                            "Bull"
-                            if trend_up
-                            else "Bear"
-                            if trend_down
+                            "Bull" if trend_up
+                            else "Bear" if trend_down
                             else "Flat"
                         )
-
-                        row[tf] = (
-                            f"{trend_label} trend; {sig['action']}"
-                        )
+                        row[tf] = f"{trend_label} trend; {sig['action']}"
 
                 row["Valid TFs"] = valid_count
-
                 row["Trend Alignment"] = (
                     f"{100 * trend_points / trend_weight:.0f}%"
                     if trend_weight
                     else "N/A"
                 )
-
                 row["BUY Confirmations"] = (
                     f"{entry_count}/{valid_count}"
                     if valid_count
@@ -2023,18 +1726,12 @@ else:
                 if (
                     entry_count >= 3
                     and row["Trend Alignment"] != "N/A"
-                    and float(
-                        row["Trend Alignment"].strip("%")
-                    ) >= 70
+                    and float(row["Trend Alignment"].strip("%")) >= 70
                 ):
-                    row["Summary"] = (
-                        "High alignment — review setup"
-                    )
+                    row["Summary"] = "High alignment — review setup"
 
                 elif entry_count >= 1:
-                    row["Summary"] = (
-                        "Some entry confirmation"
-                    )
+                    row["Summary"] = "Some entry confirmation"
 
                 else:
                     row["Summary"] = "No confirmed BUY"
@@ -2042,7 +1739,6 @@ else:
                 rows.append(row)
 
             status.success("Matrix complete.")
-
             matrix = pd.DataFrame(rows)
 
             st.dataframe(
@@ -2052,23 +1748,16 @@ else:
             )
 
             st.caption(
-                "Trend Alignment is a weighted descriptive score, "
-                "not a probability of profit. BUY Confirmations counts "
-                "timeframes meeting this strategy's entry rules. "
-                "A ticker can be bullish without a valid entry, and "
-                "no score guarantees an outcome."
+                "Trend Alignment is a weighted descriptive score, not a "
+                "probability of profit. BUY Confirmations counts timeframes "
+                "meeting this strategy's entry rules. A ticker can be bullish "
+                "without a valid entry, and no score guarantees an outcome."
             )
 
 
-# ---------------------------------------------------------------------------
-# Footer
-# ---------------------------------------------------------------------------
-
 st.markdown("---")
-
 st.caption(
     "BM's Trading Algo • Educational/research tool • Not a broker, "
-    "not an execution engine, and not investment advice. Always "
-    "independently verify prices, liquidity, earnings, corporate "
-    "actions, and order conditions."
+    "not an execution engine, and not investment advice. Always independently "
+    "verify prices, liquidity, earnings, corporate actions, and order conditions."
 )
