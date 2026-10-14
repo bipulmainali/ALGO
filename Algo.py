@@ -36,50 +36,63 @@ MATRIX_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="auto")
 
-def handle_matrix_selection() -> None:
-    """Navigate from a selected matrix cell before sidebar widgets are instantiated."""
-    event = st.session_state.get("matrix_table")
-    selection = (event.get("selection") if isinstance(event, dict)
-                 else getattr(event, "selection", None))
-    cells = (selection.get("cells", []) if isinstance(selection, dict)
-             else getattr(selection, "cells", []) if selection is not None else [])
+def _extract_matrix_cell(event: object) -> tuple[int, int] | None:
+    """Normalize Streamlit dataframe selection coordinates across versions."""
+    selection = (
+        event.get("selection") if isinstance(event, dict)
+        else getattr(event, "selection", None)
+    )
+    cells = (
+        selection.get("cells", []) if isinstance(selection, dict)
+        else getattr(selection, "cells", []) if selection is not None else []
+    )
     if not cells:
-        return
+        return None
 
     cell = cells[0]
     row_idx = col_idx = None
-
-    # Streamlit versions may expose cell coordinates as "row,column",
-    # a mapping, or an object with row/column attributes.
-    if isinstance(cell, str):
-        parts = re.split(r"[,;:]", cell.strip())
-        if len(parts) >= 2:
-            try:
-                row_idx, col_idx = int(parts[0]), int(parts[1])
-            except (TypeError, ValueError):
-                return
-    elif isinstance(cell, dict):
+    if isinstance(cell, dict):
         row_idx = cell.get("row")
-        col_idx = cell.get("column")
+        col_idx = cell.get("column", cell.get("col"))
+    elif isinstance(cell, (tuple, list)) and len(cell) >= 2:
+        row_idx, col_idx = cell[0], cell[1]
+    elif isinstance(cell, str):
+        # Streamlit currently serializes cell coordinates as "row,column".
+        parts = [part.strip().strip("()[]") for part in re.split(r"[,;:]", cell.strip())]
+        if len(parts) >= 2:
+            row_idx, col_idx = parts[0], parts[1]
     else:
         row_idx = getattr(cell, "row", None)
-        col_idx = getattr(cell, "column", None)
+        col_idx = getattr(cell, "column", getattr(cell, "col", None))
 
-    row_tickers = st.session_state.get("_matrix_row_tickers", [])
-    columns = st.session_state.get("_matrix_columns", [])
     try:
         row_idx = int(row_idx)
     except (TypeError, ValueError):
-        return
-    if isinstance(col_idx, str) and col_idx in columns:
-        col_idx = columns.index(col_idx)
+        return None
+    if isinstance(col_idx, str) and not col_idx.strip().isdigit():
+        return row_idx, col_idx  # column label; resolved after this helper
     try:
-        col_idx = int(col_idx)
+        return row_idx, int(col_idx)
     except (TypeError, ValueError):
+        return None
+
+
+def handle_matrix_selection() -> None:
+    """Record a pending destination; apply it before sidebar widgets render."""
+    cell = _extract_matrix_cell(st.session_state.get("matrix_table"))
+    if cell is None:
         return
 
+    row_idx, col_idx = cell
+    row_tickers = st.session_state.get("_matrix_row_tickers", [])
+    columns = st.session_state.get("_matrix_columns", [])
     if not (0 <= row_idx < len(row_tickers)):
         return
+
+    if isinstance(col_idx, str):
+        if col_idx not in columns:
+            return
+        col_idx = columns.index(col_idx)
     if not (0 <= col_idx < len(columns)):
         return
 
@@ -87,10 +100,24 @@ def handle_matrix_selection() -> None:
     if timeframe not in MATRIX_TIMEFRAMES:
         return
 
-    st.session_state["operating_mode"] = "Single Ticker Deep-Dive"
-    st.session_state["selected_tf"] = timeframe
-    st.session_state["deep_dive_ticker"] = str(row_tickers[row_idx])
-    st.session_state["_auto_run_deep_dive"] = True
+    # Do not change keys owned by widgets from inside a dataframe callback.
+    # Save the target, then apply it at the top of the next script run.
+    st.session_state["_pending_matrix_navigation"] = {
+        "ticker": str(row_tickers[row_idx]),
+        "timeframe": timeframe,
+    }
+
+
+# Apply pending navigation before the sidebar radio/select-slider are created.
+_pending_navigation = st.session_state.pop("_pending_matrix_navigation", None)
+if isinstance(_pending_navigation, dict):
+    _ticker = str(_pending_navigation.get("ticker", "")).strip().upper()
+    _timeframe = str(_pending_navigation.get("timeframe", ""))
+    if _ticker and _timeframe in MATRIX_TIMEFRAMES:
+        st.session_state["operating_mode"] = "Single Ticker Deep-Dive"
+        st.session_state["selected_tf"] = _timeframe
+        st.session_state["deep_dive_ticker"] = _ticker
+        st.session_state["_auto_run_deep_dive"] = True
 
 st.title("📈 BM's Trading Algo")
 st.caption("Rule-based screening, trade planning, and historical research — not a trade execution system.")
@@ -958,47 +985,52 @@ else:
                     row["Summary"] = "No confirmed BUY"
                 rows.append(row)
             status.success("Matrix complete.")
-            matrix = pd.DataFrame(rows)
+            st.session_state["_matrix_result"] = pd.DataFrame(rows)
 
-            # Apply muted status colors only to timeframe cells, keeping the summary
-            # columns neutral so the table remains easy to scan.
-            def matrix_cell_style(value: object) -> str:
-                text_value = str(value).upper()
-                if text_value == "BUY" or text_value.startswith("BULL TREND"):
-                    return "background-color: #214D3A; color: #E8FFF1; font-weight: 600;"
-                if text_value == "SELL / AVOID" or text_value.startswith("BEAR TREND"):
-                    return "background-color: #632F35; color: #FFECEF; font-weight: 600;"
-                if text_value == "CHOP" or text_value.startswith("FLAT TREND"):
-                    return "background-color: #424852; color: #F1F3F5;"
-                if "INSUFFICIENT" in text_value or "NO DATA" in text_value:
-                    return "background-color: #30343B; color: #C4CAD2;"
-                if "WAIT" in text_value or "HOLD" in text_value or "N/A" in text_value:
-                    return "background-color: #424852; color: #F1F3F5;"
+    # Keep the last generated matrix in session state. Streamlit reruns the
+    # script on cell selection, so the Generate Matrix button is False on that
+    # rerun; without this persistence the table disappears before navigation
+    # can be processed.
+    matrix = st.session_state.get("_matrix_result")
+
+    if isinstance(matrix, pd.DataFrame) and not matrix.empty:
+        def matrix_cell_style(value: object) -> str:
+            text_value = str(value).upper()
+            if text_value == "BUY" or text_value.startswith("BULL TREND"):
+                return "background-color: #214D3A; color: #E8FFF1; font-weight: 600;"
+            if text_value == "SELL / AVOID" or text_value.startswith("BEAR TREND"):
+                return "background-color: #632F35; color: #FFECEF; font-weight: 600;"
+            if text_value == "CHOP" or text_value.startswith("FLAT TREND"):
                 return "background-color: #424852; color: #F1F3F5;"
+            if "INSUFFICIENT" in text_value or "NO DATA" in text_value:
+                return "background-color: #30343B; color: #C4CAD2;"
+            if "WAIT" in text_value or "HOLD" in text_value or "N/A" in text_value:
+                return "background-color: #424852; color: #F1F3F5;"
+            return "background-color: #424852; color: #F1F3F5;"
 
-            # The callback runs at the start of Streamlit's rerun, before the
-            # sidebar widgets are instantiated. Store the visible row/column map
-            # so the callback can resolve the selected cell reliably.
-            st.session_state["_matrix_row_tickers"] = matrix["Ticker"].astype(str).tolist()
-            st.session_state["_matrix_columns"] = [str(column) for column in matrix.columns]
-            styled_matrix = matrix.style.map(matrix_cell_style, subset=MATRIX_TIMEFRAMES)
-            st.caption("Select a cell under 5m, 15m, 1h, 4h, or 1d to open that ticker and timeframe in Single Ticker Deep-Dive.")
-            st.dataframe(
-                styled_matrix,
-                use_container_width=True,
-                hide_index=True,
-                on_select=handle_matrix_selection,
-                selection_mode="single-cell",
-                key="matrix_table",
-                height=min(680, 38 + 35 * (len(matrix) + 1)),
-            )
+        st.session_state["_matrix_row_tickers"] = matrix["Ticker"].astype(str).tolist()
+        st.session_state["_matrix_columns"] = [str(column) for column in matrix.columns]
+        styled_matrix = matrix.style.map(matrix_cell_style, subset=MATRIX_TIMEFRAMES)
+        st.caption(
+            "Select a cell under 5m, 15m, 1h, 4h, or 1d to open that ticker "
+            "and timeframe in Single Ticker Deep-Dive."
+        )
+        st.dataframe(
+            styled_matrix,
+            use_container_width=True,
+            hide_index=True,
+            on_select=handle_matrix_selection,
+            selection_mode="single-cell",
+            key="matrix_table",
+            height=min(680, 38 + 35 * (len(matrix) + 1)),
+        )
 
-            st.caption(
-                "Legend: green = BUY/bullish trend; red = SELL/avoid/bearish trend; slate = wait, chop, or mixed signals; "
-                "dark gray = insufficient data. Trend Alignment is a weighted descriptive score, not a probability of profit. "
-                "BUY Confirmations counts timeframes meeting this strategy's entry rules. A ticker can be bullish without a valid entry, "
-                "and no score guarantees an outcome."
-            )
+        st.caption(
+            "Legend: green = BUY/bullish trend; red = SELL/avoid/bearish trend; slate = wait, chop, or mixed signals; "
+            "dark gray = insufficient data. Trend Alignment is a weighted descriptive score, not a probability of profit. "
+            "BUY Confirmations counts timeframes meeting this strategy's entry rules. A ticker can be bullish without a valid entry, "
+            "and no score guarantees an outcome."
+        )
 
 st.markdown("---")
 st.caption(
