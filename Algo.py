@@ -840,31 +840,107 @@ if mode == "Single Ticker Deep-Dive":
 
             st.subheader(f"Price Action — {ticker} ({selected_tf})")
             visible = 250 if selected_tf in ("5m", "15m") else 180 if selected_tf in ("1h", "4h") else 120
-            chart = df.tail(visible)
+            chart = df.tail(visible).copy()
+            chart = chart[~chart.index.duplicated(keep="last")].sort_index()
             fig = go.Figure()
+
             fig.add_trace(go.Candlestick(
-                x=chart.index, open=chart["Open"], high=chart["High"],
-                low=chart["Low"], close=chart["Close"], name=ticker
+                x=chart.index,
+                open=chart["Open"],
+                high=chart["High"],
+                low=chart["Low"],
+                close=chart["Close"],
+                name=ticker,
             ))
-            if selected_tf in ("5m", "15m", "1h", "4h"):
-                fig.add_trace(go.Scatter(x=chart.index, y=chart["VWAP"], name="Session VWAP", line=dict(width=1.5, dash="dot")))
-                fig.add_trace(go.Scatter(x=chart.index, y=chart["EMA_Fast"], name=f"{params['ema_fast']} EMA", line=dict(width=1.2)))
-                fig.add_trace(go.Scatter(x=chart.index, y=chart["EMA_Slow"], name=f"{params['ema_slow']} EMA", line=dict(width=1.2)))
+
+            intraday = selected_tf in ("5m", "15m", "1h", "4h")
+
+            # Break indicator lines at session/large timestamp gaps so they do
+            # not draw misleading straight lines from one trading day to another.
+            if intraday and len(chart.index) > 1:
+                expected_minutes = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}[selected_tf]
+                time_deltas = chart.index.to_series().diff()
+                gap_rows = time_deltas > pd.Timedelta(minutes=expected_minutes * 1.5)
+
+                # A NaN at the first bar after a gap forces Plotly to start a
+                # new line segment rather than connecting across the session.
+                for column in ("VWAP", "EMA_Fast", "EMA_Slow", "BB_Upper", "BB_Lower"):
+                    if column in chart.columns:
+                        chart.loc[gap_rows, column] = np.nan
+
+            if intraday:
+                if "VWAP" in chart.columns:
+                    fig.add_trace(go.Scatter(
+                        x=chart.index, y=chart["VWAP"], name="Session VWAP",
+                        mode="lines", connectgaps=False,
+                        line=dict(width=1.5, dash="dot")
+                    ))
+                if "EMA_Fast" in chart.columns:
+                    fig.add_trace(go.Scatter(
+                        x=chart.index, y=chart["EMA_Fast"],
+                        name=f"{params['ema_fast']} EMA", mode="lines",
+                        connectgaps=False, line=dict(width=1.2)
+                    ))
+                if "EMA_Slow" in chart.columns:
+                    fig.add_trace(go.Scatter(
+                        x=chart.index, y=chart["EMA_Slow"],
+                        name=f"{params['ema_slow']} EMA", mode="lines",
+                        connectgaps=False, line=dict(width=1.2)
+                    ))
             else:
-                fig.add_trace(go.Scatter(x=chart.index, y=chart["SMA_Fast"], name=f"{params['sma_fast']} SMA", line=dict(width=1.4)))
-                fig.add_trace(go.Scatter(x=chart.index, y=chart["SMA_Slow"], name=f"{params['sma_slow']} SMA", line=dict(width=1.4)))
-            fig.add_trace(go.Scatter(x=chart.index, y=chart["BB_Upper"], name="Upper Bollinger", line=dict(width=1, dash="dash")))
-            fig.add_trace(go.Scatter(x=chart.index, y=chart["BB_Lower"], name="Lower Bollinger", line=dict(width=1, dash="dash")))
+                for column, label, color in (
+                    ("SMA_Fast", f"{params['sma_fast']} SMA", None),
+                    ("SMA_Slow", f"{params['sma_slow']} SMA", None),
+                ):
+                    if column in chart.columns:
+                        fig.add_trace(go.Scatter(
+                            x=chart.index, y=chart[column], name=label,
+                            mode="lines", connectgaps=False,
+                            line=dict(width=1.4)
+                        ))
+
+            for column, label in (
+                ("BB_Upper", "Upper Bollinger"),
+                ("BB_Lower", "Lower Bollinger"),
+            ):
+                if column in chart.columns:
+                    fig.add_trace(go.Scatter(
+                        x=chart.index, y=chart[column], name=label,
+                        mode="lines", connectgaps=False,
+                        line=dict(width=1, dash="dash")
+                    ))
+
             for level in supports:
                 fig.add_hline(y=level, line_dash="dot", line_color="green", opacity=0.5)
             for level in resistances:
                 fig.add_hline(y=level, line_dash="dot", line_color="red", opacity=0.5)
+
             fig.update_layout(
-                template="plotly_dark", height=680, xaxis_rangeslider_visible=False,
-                margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h")
+                template="plotly_dark",
+                height=680,
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=10, r=10, t=30, b=10),
+                legend=dict(orientation="h"),
             )
+
+            # Compress weekends and regular-market closed hours on intraday
+            # charts. The source timestamps remain unchanged for calculations.
+            if intraday:
+                fig.update_xaxes(
+                    type="date",
+                    rangebreaks=[
+                        dict(bounds=["sat", "mon"]),
+                        dict(bounds=[16, 9.5], pattern="hour"),
+                    ],
+                )
+
             st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"Last candle shown: {df.index[-1]}. Prices are auto-adjusted Yahoo Finance history.")
+            st.caption(
+                f"Last candle shown: {df.index[-1]}. "
+                "Intraday charts compress weekends and regular-market closed hours; "
+                "indicator lines restart after large session gaps. "
+                "Prices are auto-adjusted Yahoo Finance history."
+            )
 
 
 # ---------------------------------------------------------------------------
