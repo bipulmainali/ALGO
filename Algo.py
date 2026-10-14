@@ -875,14 +875,6 @@ if analysis_ticker:
             is_intraday = selected_tf in ("5m", "15m")
             supports, resistances = scanner.support_resistance(df)
             vix_value = latest.get("VIX", np.nan)
-            cols = st.columns(6)
-            cols[0].metric("Last Completed Close", format_money(price))
-            cols[1].metric("RSI", f"{latest['RSI']:.1f}")
-            cols[2].metric("ADX", f"{latest['ADX']:.1f}")
-            cols[3].metric("RVOL", f"{latest['RVOL']:.2f}x")
-            cols[4].metric("ATR", format_money(latest["ATR"]))
-            cols[5].metric("Prior VIX Close", f"{vix_value:.1f}" if np.isfinite(vix_value) else "Unavailable")
-
             st.subheader("🤖 Trading Signal")
             action = sig["action"]
             if action == "BUY":
@@ -903,11 +895,11 @@ if analysis_ticker:
             vwap_value = latest.get("VWAP", np.nan)
             indicator_cols = st.columns(4)
             indicator_cols[0].metric("Last Close", format_money(price))
-            indicator_cols[1].metric("Trend (SMA)", trend_label)
+            indicator_cols[1].metric("SMA Trend", trend_label)
             indicator_cols[2].metric("RSI (14)", f"{latest['RSI']:.1f}")
             indicator_cols[3].metric("ADX (14)", f"{latest['ADX']:.1f}")
 
-            indicator_cols2 = st.columns(4)
+            indicator_cols2 = st.columns(5)
             indicator_cols2[0].metric("Relative Volume", f"{latest['RVOL']:.2f}x")
             indicator_cols2[1].metric("ATR", format_money(latest["ATR"]))
             indicator_cols2[2].metric(
@@ -916,7 +908,11 @@ if analysis_ticker:
             )
             indicator_cols2[3].metric(
                 "VWAP",
-                format_money(vwap_value) if np.isfinite(vwap_value) else "N/A (swing timeframe)",
+                format_money(vwap_value) if np.isfinite(vwap_value) else "N/A",
+            )
+            indicator_cols2[4].metric(
+                "Prior VIX Close",
+                f"{vix_value:.1f}" if np.isfinite(vix_value) else "N/A",
             )
 
             with st.expander("How to read these indicators"):
@@ -933,9 +929,49 @@ if analysis_ticker:
                 )
 
             st.subheader("🧱 Confirmed Historical Levels")
-            l, r = st.columns(2)
-            l.write("**Support:** " + (", ".join(format_money(x) for x in supports) if supports else "No confirmed level detected"))
-            r.write("**Resistance:** " + (", ".join(format_money(x) for x in resistances) if resistances else "No confirmed level detected"))
+
+            # Render support/resistance in a single, consistently styled table.
+            level_count = max(len(supports), len(resistances), 1)
+            support_text = [format_money(x) for x in supports]
+            resistance_text = [format_money(x) for x in resistances]
+            support_text += ["—"] * (level_count - len(support_text))
+            resistance_text += ["—"] * (level_count - len(resistance_text))
+            levels_df = pd.DataFrame({
+                "Support": support_text,
+                "Resistance": resistance_text,
+            })
+            levels_style = (
+                levels_df.style
+                .set_properties(**{
+                    "font-size": "14px",
+                    "font-weight": "400",
+                    "color": "#F1F3F5",
+                    "background-color": "#20242B",
+                    "text-align": "left",
+                })
+                .set_table_styles([
+                    {
+                        "selector": "th",
+                        "props": [
+                            ("font-size", "14px"),
+                            ("font-weight", "600"),
+                            ("color", "#F1F3F5"),
+                            ("background-color", "#303640"),
+                            ("text-align", "left"),
+                        ],
+                    },
+                    {
+                        "selector": "td",
+                        "props": [("padding", "8px 12px")],
+                    },
+                ])
+            )
+            st.dataframe(
+                levels_style,
+                hide_index=True,
+                use_container_width=True,
+                height=min(220, 38 + 35 * (level_count + 1)),
+            )
 
             st.subheader(f"Price Action — {ticker} ({selected_tf})")
             visible = 250 if selected_tf in ("5m", "15m") else 180 if selected_tf in ("1h", "4h") else 120
