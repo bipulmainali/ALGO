@@ -108,16 +108,18 @@ def handle_matrix_selection() -> None:
     }
 
 
-# Apply pending navigation before the sidebar radio/select-slider are created.
+# Apply a matrix selection before the analysis controls are rendered.
+# The matrix stays on the page; selection only updates the analysis below.
+st.session_state.setdefault("selected_tf", "1h")
+st.session_state.setdefault("selected_analysis_ticker", "")
+
 _pending_navigation = st.session_state.pop("_pending_matrix_navigation", None)
 if isinstance(_pending_navigation, dict):
     _ticker = str(_pending_navigation.get("ticker", "")).strip().upper()
     _timeframe = str(_pending_navigation.get("timeframe", ""))
     if _ticker and _timeframe in MATRIX_TIMEFRAMES:
-        st.session_state["operating_mode"] = "Single Ticker Deep-Dive"
+        st.session_state["selected_analysis_ticker"] = _ticker
         st.session_state["selected_tf"] = _timeframe
-        st.session_state["deep_dive_ticker"] = _ticker
-        st.session_state["_auto_run_deep_dive"] = True
 
 st.title("📈 BM's Trading Algo")
 st.caption("Rule-based entry, exit, and wait signals with technical indicators — not a trade execution system.")
@@ -714,39 +716,153 @@ def analyze_ticker(ticker: str, tf: str, p: dict) -> tuple[pd.DataFrame, Trading
     return indicators, scanner, row, scanner.signal(row, tf)
 
 
-# Sidebar
-st.sidebar.header("Terminal Navigation")
-mode = st.sidebar.radio(
-    "Operating Mode",
-    ["Single Ticker Deep-Dive", "Single-TF Watchlist Scanner", "Multi-Timeframe Matrix"],
-    key="operating_mode",
-)
-selected_tf = st.sidebar.select_slider(
-    "Timeframe", options=TIMEFRAMES, value="1h", key="selected_tf"
-)
 params = make_params()
 
 st.caption(
     "Signal-focused mode: review ENTRY, EXIT / AVOID, or WAIT decisions and the indicators behind them. "
-    "Indicator settings use fixed defaults; account sizing, commissions, slippage, and backtest controls are hidden."
+    "Account sizing, commissions, slippage, and backtest controls are hidden."
 )
 
 
-# ---------------------------------------------------------------------------
-# Mode 1 — Deep dive
+# Multi-timeframe matrix — always shown first
 # ---------------------------------------------------------------------------
 
-if mode == "Single Ticker Deep-Dive":
-    ticker = st.sidebar.text_input("Ticker", value="SPY", key="deep_dive_ticker").strip().upper()
-    # Persistent, prominent context heading so the selected symbol and interval
-    # are visible at the top of the page, not only above the chart.
-    st.header(f"🔎 {ticker} — {selected_tf} Deep-Dive")
-    st.caption(f"Selected ticker: {ticker}  |  Analysis timeframe: {selected_tf}")
+st.subheader("🌐 Multi-Timeframe Trend & Entry Matrix")
+st.caption("Select any timeframe cell to load that ticker’s analysis below. The matrix stays visible and does not change when you adjust the analysis timeframe.")
+tickers_text = st.text_area("Comma-separated ticker symbols", value=DEFAULT_WATCHLIST, key="matrix_tickers")
+scan = st.button("Generate Matrix", type="primary")
+if scan:
+    tickers = list(dict.fromkeys(t.strip().upper() for t in tickers_text.replace("\n", ",").split(",") if t.strip()))
+    if not tickers:
+        st.warning("Enter at least one ticker.")
+    else:
+        rows = []
+        total = len(tickers) * len(MATRIX_TIMEFRAMES)
+        done = 0
+        progress = st.progress(0)
+        status = st.empty()
+        for ticker in tickers:
+            row = {"Ticker": ticker, "Price": np.nan}
+            trend_points = 0.0
+            trend_weight = 0.0
+            entry_count = 0
+            valid_count = 0
+            for tf in MATRIX_TIMEFRAMES:
+                done += 1
+                status.text(f"Evaluating {ticker} on {tf} ({done}/{total})")
+                progress.progress(done / total)
+                df, scanner, latest, sig = analyze_ticker(ticker, tf, params)
+                if latest is None:
+                    row[tf] = sig["action"]
+                    continue
+                if not np.isfinite(row["Price"]):
+                    row["Price"] = round(float(latest["Close"]), 2)
+                valid_count += 1
+                # Higher timeframes get more weight for trend context.
+                weight = {"5m": 1, "15m": 1, "1h": 2, "4h": 3, "1d": 4}[tf]
+                trend_up = bool(latest["SMA_Fast"] > latest["SMA_Slow"])
+                trend_down = bool(latest["SMA_Fast"] < latest["SMA_Slow"])
+                if trend_up:
+                    trend_points += weight
+                trend_weight += weight
+                if sig["action"] == "BUY":
+                    row[tf] = "BUY"
+                    entry_count += 1
+                elif sig["action"] == "SELL / AVOID":
+                    row[tf] = "SELL / AVOID"
+                elif sig["action"] == "CHOP / RANGE":
+                    row[tf] = "CHOP"
+                else:
+                    row[tf] = f"{'Bull' if trend_up else 'Bear' if trend_down else 'Flat'} trend; {sig['action']}"
+            row["Valid TFs"] = valid_count
+            row["Trend Alignment"] = f"{100 * trend_points / trend_weight:.0f}%" if trend_weight else "N/A"
+            row["BUY Confirmations"] = f"{entry_count}/{valid_count}" if valid_count else "N/A"
+            if entry_count >= 3 and row["Trend Alignment"] != "N/A" and float(row["Trend Alignment"].strip("%")) >= 70:
+                row["Summary"] = "High alignment — review setup"
+            elif entry_count >= 1:
+                row["Summary"] = "Some entry confirmation"
+            else:
+                row["Summary"] = "No confirmed BUY"
+            rows.append(row)
+        status.success("Matrix complete.")
+        st.session_state["_matrix_result"] = pd.DataFrame(rows)
 
-    run_clicked = st.sidebar.button("Run Analysis", type="primary")
-    auto_run = st.session_state.pop("_auto_run_deep_dive", False)
-    run = run_clicked or auto_run
-    if run:
+# Keep the last generated matrix in session state. Streamlit reruns the
+# script on cell selection, so the Generate Matrix button is False on that
+# rerun; without this persistence the table disappears before navigation
+# can be processed.
+matrix = st.session_state.get("_matrix_result")
+
+if isinstance(matrix, pd.DataFrame) and not matrix.empty:
+    def matrix_cell_style(value: object) -> str:
+        text_value = str(value).upper()
+        if text_value == "BUY" or text_value.startswith("BULL TREND"):
+            return "background-color: #214D3A; color: #E8FFF1; font-weight: 600;"
+        if text_value == "SELL / AVOID" or text_value.startswith("BEAR TREND"):
+            return "background-color: #632F35; color: #FFECEF; font-weight: 600;"
+        if text_value == "CHOP" or text_value.startswith("FLAT TREND"):
+            return "background-color: #424852; color: #F1F3F5;"
+        if "INSUFFICIENT" in text_value or "NO DATA" in text_value:
+            return "background-color: #30343B; color: #C4CAD2;"
+        if "WAIT" in text_value or "HOLD" in text_value or "N/A" in text_value:
+            return "background-color: #424852; color: #F1F3F5;"
+        return "background-color: #424852; color: #F1F3F5;"
+
+    st.session_state["_matrix_row_tickers"] = matrix["Ticker"].astype(str).tolist()
+    st.session_state["_matrix_columns"] = [str(column) for column in matrix.columns]
+    styled_matrix = matrix.style.map(matrix_cell_style, subset=MATRIX_TIMEFRAMES)
+    st.caption(
+        "Select a cell under 5m, 15m, 1h, 4h, or 1d to open that ticker "
+        "and timeframe in the analysis panel below."
+    )
+    st.dataframe(
+        styled_matrix,
+        use_container_width=True,
+        hide_index=True,
+        on_select=handle_matrix_selection,
+        selection_mode="single-cell",
+        key="matrix_table",
+        height=min(680, 38 + 35 * (len(matrix) + 1)),
+    )
+
+    st.caption(
+        "Legend: green = BUY/bullish trend; red = SELL/avoid/bearish trend; slate = wait, chop, or mixed signals; "
+        "dark gray = insufficient data. Trend Alignment is a weighted descriptive score, not a probability of profit. "
+        "BUY Confirmations counts timeframes meeting this strategy's entry rules. A ticker can be bullish without a valid entry, "
+        "and no score guarantees an outcome."
+    )
+
+
+
+
+# ---------------------------------------------------------------------------
+# Deep analysis panel — rendered below the matrix on the same page
+# ---------------------------------------------------------------------------
+
+analysis_ticker = st.session_state.get("selected_analysis_ticker", "").strip().upper()
+
+if analysis_ticker:
+    st.markdown("---")
+    st.subheader("🔎 Selected Ticker Deep-Dive")
+    control_left, control_right = st.columns([1, 2])
+    with control_left:
+        ticker = st.text_input(
+            "Analysis ticker",
+            key="selected_analysis_ticker",
+            help="Choose a ticker manually or click a ticker cell in the matrix above.",
+        ).strip().upper()
+    with control_right:
+        selected_tf = st.select_slider(
+            "Analysis timeframe",
+            options=TIMEFRAMES,
+            key="selected_tf",
+            help="This changes only the deep-dive below. It does not change the matrix.",
+        )
+
+    if ticker:
+        st.header(f"🔎 {ticker} — {selected_tf} Deep-Dive")
+        st.caption(f"Selected ticker: {ticker}  |  Analysis timeframe: {selected_tf}")
+
         with st.spinner(f"Analyzing {ticker} ({selected_tf})..."):
             df, scanner, latest, sig = analyze_ticker(ticker, selected_tf, params)
         if df.empty:
@@ -926,165 +1042,7 @@ if mode == "Single Ticker Deep-Dive":
             )
 
 
-# ---------------------------------------------------------------------------
-# Mode 2 — Single timeframe watchlist scanner
-# ---------------------------------------------------------------------------
-
-elif mode == "Single-TF Watchlist Scanner":
-    st.subheader(f"🔭 Watchlist Scanner ({selected_tf})")
-    tickers_text = st.text_area("Comma-separated ticker symbols", value=DEFAULT_WATCHLIST)
-    scan = st.button("Scan Watchlist", type="primary")
-    if scan:
-        tickers = list(dict.fromkeys(t.strip().upper() for t in tickers_text.replace("\n", ",").split(",") if t.strip()))
-        if not tickers:
-            st.warning("Enter at least one ticker.")
-        else:
-            rows = []
-            progress = st.progress(0)
-            status = st.empty()
-            for i, ticker in enumerate(tickers):
-                status.text(f"Analyzing {ticker} ({i + 1}/{len(tickers)})")
-                df, scanner, latest, sig = analyze_ticker(ticker, selected_tf, params)
-                if latest is not None:
-                    supports, resistances = scanner.support_resistance(df)
-                    row = {
-                        "Ticker": ticker, "Signal": sig["action"],
-                        "Close": round(float(latest["Close"]), 2),
-                        "RSI": round(float(latest["RSI"]), 1),
-                        "ADX": round(float(latest["ADX"]), 1),
-                        "RVOL": round(float(latest["RVOL"]), 2),
-                        "ATR %": round(float(latest["ATR_Pct"]), 2),
-                        "Reason": sig["reason"],
-                    }
-                    rows.append(row)
-                else:
-                    rows.append({"Ticker": ticker, "Signal": sig["action"], "Reason": sig["reason"]})
-                progress.progress((i + 1) / len(tickers))
-            status.success("Scan complete.")
-            results = pd.DataFrame(rows)
-            buys = results[results["Signal"] == "BUY"] if "Signal" in results else pd.DataFrame()
-            st.subheader(f"Qualified BUY Setups: {len(buys)}")
-            if not buys.empty:
-                st.dataframe(
-                    buys.sort_values("RVOL", ascending=False, na_position="last")
-                    if "RVOL" in buys else buys,
-                    use_container_width=True, hide_index=True
-                )
-            else:
-                st.info("No BUY setups qualified. This is a valid outcome; do not loosen filters solely to force signals.")
-            with st.expander("Show all ticker results, including WAIT/SELL/insufficient history"):
-                st.dataframe(results, use_container_width=True, hide_index=True)
-
-
-# ---------------------------------------------------------------------------
-# Mode 3 — Multi-timeframe matrix
-# ---------------------------------------------------------------------------
-
-else:
-    st.subheader("🌐 Multi-Timeframe Trend & Entry Matrix")
-    st.caption("Trend alignment and actionable entries are shown separately. Missing/insufficient intervals are not counted as bearish.")
-    tickers_text = st.text_area("Comma-separated ticker symbols", value=DEFAULT_WATCHLIST, key="matrix_tickers")
-    scan = st.button("Generate Matrix", type="primary")
-    if scan:
-        tickers = list(dict.fromkeys(t.strip().upper() for t in tickers_text.replace("\n", ",").split(",") if t.strip()))
-        if not tickers:
-            st.warning("Enter at least one ticker.")
-        else:
-            rows = []
-            total = len(tickers) * len(MATRIX_TIMEFRAMES)
-            done = 0
-            progress = st.progress(0)
-            status = st.empty()
-            for ticker in tickers:
-                row = {"Ticker": ticker, "Price": np.nan}
-                trend_points = 0.0
-                trend_weight = 0.0
-                entry_count = 0
-                valid_count = 0
-                for tf in MATRIX_TIMEFRAMES:
-                    done += 1
-                    status.text(f"Evaluating {ticker} on {tf} ({done}/{total})")
-                    progress.progress(done / total)
-                    df, scanner, latest, sig = analyze_ticker(ticker, tf, params)
-                    if latest is None:
-                        row[tf] = sig["action"]
-                        continue
-                    if not np.isfinite(row["Price"]):
-                        row["Price"] = round(float(latest["Close"]), 2)
-                    valid_count += 1
-                    # Higher timeframes get more weight for trend context.
-                    weight = {"5m": 1, "15m": 1, "1h": 2, "4h": 3, "1d": 4}[tf]
-                    trend_up = bool(latest["SMA_Fast"] > latest["SMA_Slow"])
-                    trend_down = bool(latest["SMA_Fast"] < latest["SMA_Slow"])
-                    if trend_up:
-                        trend_points += weight
-                    trend_weight += weight
-                    if sig["action"] == "BUY":
-                        row[tf] = "BUY"
-                        entry_count += 1
-                    elif sig["action"] == "SELL / AVOID":
-                        row[tf] = "SELL / AVOID"
-                    elif sig["action"] == "CHOP / RANGE":
-                        row[tf] = "CHOP"
-                    else:
-                        row[tf] = f"{'Bull' if trend_up else 'Bear' if trend_down else 'Flat'} trend; {sig['action']}"
-                row["Valid TFs"] = valid_count
-                row["Trend Alignment"] = f"{100 * trend_points / trend_weight:.0f}%" if trend_weight else "N/A"
-                row["BUY Confirmations"] = f"{entry_count}/{valid_count}" if valid_count else "N/A"
-                if entry_count >= 3 and row["Trend Alignment"] != "N/A" and float(row["Trend Alignment"].strip("%")) >= 70:
-                    row["Summary"] = "High alignment — review setup"
-                elif entry_count >= 1:
-                    row["Summary"] = "Some entry confirmation"
-                else:
-                    row["Summary"] = "No confirmed BUY"
-                rows.append(row)
-            status.success("Matrix complete.")
-            st.session_state["_matrix_result"] = pd.DataFrame(rows)
-
-    # Keep the last generated matrix in session state. Streamlit reruns the
-    # script on cell selection, so the Generate Matrix button is False on that
-    # rerun; without this persistence the table disappears before navigation
-    # can be processed.
-    matrix = st.session_state.get("_matrix_result")
-
-    if isinstance(matrix, pd.DataFrame) and not matrix.empty:
-        def matrix_cell_style(value: object) -> str:
-            text_value = str(value).upper()
-            if text_value == "BUY" or text_value.startswith("BULL TREND"):
-                return "background-color: #214D3A; color: #E8FFF1; font-weight: 600;"
-            if text_value == "SELL / AVOID" or text_value.startswith("BEAR TREND"):
-                return "background-color: #632F35; color: #FFECEF; font-weight: 600;"
-            if text_value == "CHOP" or text_value.startswith("FLAT TREND"):
-                return "background-color: #424852; color: #F1F3F5;"
-            if "INSUFFICIENT" in text_value or "NO DATA" in text_value:
-                return "background-color: #30343B; color: #C4CAD2;"
-            if "WAIT" in text_value or "HOLD" in text_value or "N/A" in text_value:
-                return "background-color: #424852; color: #F1F3F5;"
-            return "background-color: #424852; color: #F1F3F5;"
-
-        st.session_state["_matrix_row_tickers"] = matrix["Ticker"].astype(str).tolist()
-        st.session_state["_matrix_columns"] = [str(column) for column in matrix.columns]
-        styled_matrix = matrix.style.map(matrix_cell_style, subset=MATRIX_TIMEFRAMES)
-        st.caption(
-            "Select a cell under 5m, 15m, 1h, 4h, or 1d to open that ticker "
-            "and timeframe in Single Ticker Deep-Dive."
-        )
-        st.dataframe(
-            styled_matrix,
-            use_container_width=True,
-            hide_index=True,
-            on_select=handle_matrix_selection,
-            selection_mode="single-cell",
-            key="matrix_table",
-            height=min(680, 38 + 35 * (len(matrix) + 1)),
-        )
-
-        st.caption(
-            "Legend: green = BUY/bullish trend; red = SELL/avoid/bearish trend; slate = wait, chop, or mixed signals; "
-            "dark gray = insufficient data. Trend Alignment is a weighted descriptive score, not a probability of profit. "
-            "BUY Confirmations counts timeframes meeting this strategy's entry rules. A ticker can be bullish without a valid entry, "
-            "and no score guarantees an outcome."
-        )
+    # ---------------------------------------------------------------------------
 
 st.markdown("---")
 st.caption(
