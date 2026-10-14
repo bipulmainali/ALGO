@@ -233,10 +233,29 @@ def get_price_data(ticker: str, tf: str) -> pd.DataFrame:
         # used for Monday decisions; it is never used for Friday intraday decisions.
         vix_available = vix.copy()
         vix_available.index = vix_available.index + pd.Timedelta(days=1)
-        left = pd.DataFrame({"_date": pd.DatetimeIndex(data.index).normalize(), "_order": np.arange(len(data))})
-        right = pd.DataFrame({"_date": vix_available.index, "VIX": vix_available.to_numpy()}).sort_values("_date")
-        merged = pd.merge_asof(left.sort_values("_date"), right, on="_date", direction="backward")
-        data["VIX"] = merged.sort_values("_order")["VIX"].to_numpy()
+
+        # merge_asof requires identical key dtypes. Yahoo Finance can return a
+        # timezone-aware index in some environments and a timezone-naive index in
+        # others, so normalize BOTH join keys to timezone-naive datetime64[ns].
+        def _naive_normalized_index(values) -> pd.DatetimeIndex:
+            idx = pd.DatetimeIndex(pd.to_datetime(values, errors="coerce"))
+            if idx.tz is not None:
+                idx = idx.tz_convert(NY).tz_localize(None)
+            return idx.normalize()
+
+        left = pd.DataFrame({
+            "_date": _naive_normalized_index(data.index),
+            "_order": np.arange(len(data)),
+        })
+        right = pd.DataFrame({
+            "_date": _naive_normalized_index(vix_available.index),
+            "VIX": pd.to_numeric(vix_available.to_numpy(), errors="coerce"),
+        }).dropna(subset=["_date"]).sort_values("_date")
+        left = left.dropna(subset=["_date"]).sort_values("_date")
+        merged = pd.merge_asof(left, right, on="_date", direction="backward")
+        data["VIX"] = merged.sort_values("_order")["VIX"].reindex(
+            np.arange(len(data))
+        ).to_numpy()
     else:
         data["VIX"] = np.nan
     return data
