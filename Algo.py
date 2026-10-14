@@ -759,6 +759,11 @@ st.info(
 
 if mode == "Single Ticker Deep-Dive":
     ticker = st.sidebar.text_input("Ticker", value="SPY", key="deep_dive_ticker").strip().upper()
+    # Persistent, prominent context heading so the selected symbol and interval
+    # are visible at the top of the page, not only above the chart.
+    st.header(f"🔎 {ticker} — {selected_tf} Deep-Dive")
+    st.caption(f"Selected ticker: {ticker}  |  Analysis timeframe: {selected_tf}")
+
     run_clicked = st.sidebar.button("Run Analysis", type="primary")
     auto_run = st.session_state.pop("_auto_run_deep_dive", False)
     run = run_clicked or auto_run
