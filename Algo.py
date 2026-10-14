@@ -35,13 +35,41 @@ MATRIX_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="auto")
 
-# Apply matrix-cell navigation before sidebar widgets are instantiated. Streamlit does
-# not allow changing an existing widget's session state after that widget is rendered.
-_pending_matrix_navigation = st.session_state.pop("_pending_matrix_navigation", None)
-if _pending_matrix_navigation:
+def handle_matrix_selection() -> None:
+    """Navigate from a selected matrix timeframe cell before widgets render."""
+    event = st.session_state.get("matrix_table")
+    selection = getattr(event, "selection", None)
+    cells = getattr(selection, "cells", []) if selection is not None else []
+    if not cells:
+        return
+
+    cell = cells[0]
+    if isinstance(cell, dict):
+        row_idx = cell.get("row")
+        col_idx = cell.get("column")
+    else:
+        row_idx = getattr(cell, "row", None)
+        col_idx = getattr(cell, "column", None)
+
+    if row_idx is None or col_idx is None:
+        return
+
+    row_tickers = st.session_state.get("_matrix_row_tickers", [])
+    columns = st.session_state.get("_matrix_columns", [])
+    if not (0 <= int(row_idx) < len(row_tickers)):
+        return
+    if not (0 <= int(col_idx) < len(columns)):
+        return
+
+    timeframe = str(columns[int(col_idx)])
+    if timeframe not in MATRIX_TIMEFRAMES:
+        return
+
+    # This callback runs before the main script reruns, so these widget values
+    # can safely be set before the sidebar radio/slider/text input are created.
     st.session_state["operating_mode"] = "Single Ticker Deep-Dive"
-    st.session_state["selected_tf"] = _pending_matrix_navigation["timeframe"]
-    st.session_state["deep_dive_ticker"] = _pending_matrix_navigation["ticker"]
+    st.session_state["selected_tf"] = timeframe
+    st.session_state["deep_dive_ticker"] = str(row_tickers[int(row_idx)])
     st.session_state["_auto_run_deep_dive"] = True
 
 st.title("📈 BM's Trading Algo")
@@ -928,35 +956,22 @@ else:
                     return "background-color: #424852; color: #F1F3F5;"
                 return "background-color: #424852; color: #F1F3F5;"
 
+            # The callback runs at the start of Streamlit's rerun, before the
+            # sidebar widgets are instantiated. Store the visible row/column map
+            # so the callback can resolve the selected cell reliably.
+            st.session_state["_matrix_row_tickers"] = matrix["Ticker"].astype(str).tolist()
+            st.session_state["_matrix_columns"] = [str(column) for column in matrix.columns]
             styled_matrix = matrix.style.map(matrix_cell_style, subset=MATRIX_TIMEFRAMES)
             st.caption("Click a cell under 5m, 15m, 1h, 4h, or 1d to open that ticker and timeframe in Single Ticker Deep-Dive.")
-            matrix_event = st.dataframe(
+            st.dataframe(
                 styled_matrix,
                 use_container_width=True,
                 hide_index=True,
-                on_select="rerun",
+                on_select=handle_matrix_selection,
                 selection_mode="single-cell",
                 key="matrix_table",
                 height=min(680, 38 + 35 * (len(matrix) + 1)),
             )
-
-            # A selected cell reports its zero-based row and column. Only timeframe
-            # columns trigger navigation; selecting a summary/price cell does nothing.
-            selected_cells = matrix_event.selection.cells if matrix_event and hasattr(matrix_event, "selection") else []
-            if selected_cells:
-                selected_cell = selected_cells[0]
-                row_idx = selected_cell.get("row")
-                col_idx = selected_cell.get("column")
-                if row_idx is not None and col_idx is not None:
-                    if 0 <= row_idx < len(matrix) and 0 <= col_idx < len(matrix.columns):
-                        clicked_column = str(matrix.columns[col_idx])
-                        if clicked_column in MATRIX_TIMEFRAMES:
-                            clicked_ticker = str(matrix.iloc[row_idx]["Ticker"])
-                            st.session_state["_pending_matrix_navigation"] = {
-                                "ticker": clicked_ticker,
-                                "timeframe": clicked_column,
-                            }
-                            st.rerun()
 
             st.caption(
                 "Legend: green = BUY/bullish trend; red = SELL/avoid/bearish trend; slate = wait, chop, or mixed signals; "
