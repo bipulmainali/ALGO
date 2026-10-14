@@ -11,6 +11,7 @@ Important:
 from __future__ import annotations
 
 import math
+import re
 import time
 import warnings
 from datetime import datetime, time as dt_time, timedelta
@@ -36,40 +37,59 @@ MATRIX_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="auto")
 
 def handle_matrix_selection() -> None:
-    """Navigate from a selected matrix timeframe cell before widgets render."""
+    """Navigate from a selected matrix cell before sidebar widgets are instantiated."""
     event = st.session_state.get("matrix_table")
-    selection = getattr(event, "selection", None)
-    cells = getattr(selection, "cells", []) if selection is not None else []
+    selection = (event.get("selection") if isinstance(event, dict)
+                 else getattr(event, "selection", None))
+    cells = (selection.get("cells", []) if isinstance(selection, dict)
+             else getattr(selection, "cells", []) if selection is not None else [])
     if not cells:
         return
 
     cell = cells[0]
-    if isinstance(cell, dict):
+    row_idx = col_idx = None
+
+    # Streamlit versions may expose cell coordinates as "row,column",
+    # a mapping, or an object with row/column attributes.
+    if isinstance(cell, str):
+        parts = re.split(r"[,;:]", cell.strip())
+        if len(parts) >= 2:
+            try:
+                row_idx, col_idx = int(parts[0]), int(parts[1])
+            except (TypeError, ValueError):
+                return
+    elif isinstance(cell, dict):
         row_idx = cell.get("row")
         col_idx = cell.get("column")
     else:
         row_idx = getattr(cell, "row", None)
         col_idx = getattr(cell, "column", None)
 
-    if row_idx is None or col_idx is None:
-        return
-
     row_tickers = st.session_state.get("_matrix_row_tickers", [])
     columns = st.session_state.get("_matrix_columns", [])
-    if not (0 <= int(row_idx) < len(row_tickers)):
+    try:
+        row_idx = int(row_idx)
+    except (TypeError, ValueError):
         return
-    if not (0 <= int(col_idx) < len(columns)):
+    if isinstance(col_idx, str) and col_idx in columns:
+        col_idx = columns.index(col_idx)
+    try:
+        col_idx = int(col_idx)
+    except (TypeError, ValueError):
         return
 
-    timeframe = str(columns[int(col_idx)])
+    if not (0 <= row_idx < len(row_tickers)):
+        return
+    if not (0 <= col_idx < len(columns)):
+        return
+
+    timeframe = str(columns[col_idx])
     if timeframe not in MATRIX_TIMEFRAMES:
         return
 
-    # This callback runs before the main script reruns, so these widget values
-    # can safely be set before the sidebar radio/slider/text input are created.
     st.session_state["operating_mode"] = "Single Ticker Deep-Dive"
     st.session_state["selected_tf"] = timeframe
-    st.session_state["deep_dive_ticker"] = str(row_tickers[int(row_idx)])
+    st.session_state["deep_dive_ticker"] = str(row_tickers[row_idx])
     st.session_state["_auto_run_deep_dive"] = True
 
 st.title("📈 BM's Trading Algo")
@@ -962,7 +982,7 @@ else:
             st.session_state["_matrix_row_tickers"] = matrix["Ticker"].astype(str).tolist()
             st.session_state["_matrix_columns"] = [str(column) for column in matrix.columns]
             styled_matrix = matrix.style.map(matrix_cell_style, subset=MATRIX_TIMEFRAMES)
-            st.caption("Click a cell under 5m, 15m, 1h, 4h, or 1d to open that ticker and timeframe in Single Ticker Deep-Dive.")
+            st.caption("Select a cell under 5m, 15m, 1h, 4h, or 1d to open that ticker and timeframe in Single Ticker Deep-Dive.")
             st.dataframe(
                 styled_matrix,
                 use_container_width=True,
