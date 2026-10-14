@@ -234,28 +234,35 @@ def get_price_data(ticker: str, tf: str) -> pd.DataFrame:
         vix_available = vix.copy()
         vix_available.index = vix_available.index + pd.Timedelta(days=1)
 
-        # merge_asof requires identical key dtypes. Yahoo Finance can return a
-        # timezone-aware index in some environments and a timezone-naive index in
-        # others, so normalize BOTH join keys to timezone-naive datetime64[ns].
-        def _naive_normalized_index(values) -> pd.DatetimeIndex:
-            idx = pd.DatetimeIndex(pd.to_datetime(values, errors="coerce"))
-            if idx.tz is not None:
-                idx = idx.tz_convert(NY).tz_localize(None)
-            return idx.normalize()
+        # Do not use merge_asof here: pandas can still reject the join keys when
+        # the provider returns mixed timezone/object datetime values. Convert
+        # both sides to integer day keys and use searchsorted instead. This avoids
+        # dtype-sensitive joins while retaining backward-only (no-look-ahead)
+        # matching to the latest VIX close available on each price-bar date.
+        def _day_keys(values) -> np.ndarray:
+            idx = pd.DatetimeIndex(pd.to_datetime(values, errors="coerce", utc=True))
+            idx = idx.tz_convert(NY).tz_localize(None).normalize()
+            # datetime64[ns] -> integer nanoseconds; NaT becomes the int64 minimum.
+            return idx.to_numpy(dtype="datetime64[ns]").astype("int64")
 
-        left = pd.DataFrame({
-            "_date": _naive_normalized_index(data.index),
-            "_order": np.arange(len(data)),
-        })
-        right = pd.DataFrame({
-            "_date": _naive_normalized_index(vix_available.index),
-            "VIX": pd.to_numeric(vix_available.to_numpy(), errors="coerce"),
-        }).dropna(subset=["_date"]).sort_values("_date")
-        left = left.dropna(subset=["_date"]).sort_values("_date")
-        merged = pd.merge_asof(left, right, on="_date", direction="backward")
-        data["VIX"] = merged.sort_values("_order")["VIX"].reindex(
-            np.arange(len(data))
-        ).to_numpy()
+        price_days = _day_keys(data.index)
+        vix_days = _day_keys(vix_available.index)
+        vix_values = pd.to_numeric(vix_available.to_numpy(), errors="coerce").astype(float)
+
+        valid_vix = (vix_days != np.iinfo(np.int64).min) & np.isfinite(vix_values)
+        vix_days = vix_days[valid_vix]
+        vix_values = vix_values[valid_vix]
+        order = np.argsort(vix_days, kind="stable")
+        vix_days = vix_days[order]
+        vix_values = vix_values[order]
+
+        matched = np.full(len(price_days), np.nan, dtype=float)
+        valid_price = price_days != np.iinfo(np.int64).min
+        positions = np.searchsorted(vix_days, price_days[valid_price], side="right") - 1
+        has_match = positions >= 0
+        valid_indices = np.flatnonzero(valid_price)
+        matched[valid_indices[has_match]] = vix_values[positions[has_match]]
+        data["VIX"] = matched
     else:
         data["VIX"] = np.nan
     return data
