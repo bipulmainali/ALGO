@@ -57,7 +57,6 @@ def _extract_matrix_cell(event: object) -> tuple[int, int] | None:
     elif isinstance(cell, (tuple, list)) and len(cell) >= 2:
         row_idx, col_idx = cell[0], cell[1]
     elif isinstance(cell, str):
-        # Streamlit currently serializes cell coordinates as "row,column".
         parts = [part.strip().strip("()[]") for part in re.split(r"[,;:]", cell.strip())]
         if len(parts) >= 2:
             row_idx, col_idx = parts[0], parts[1]
@@ -70,7 +69,7 @@ def _extract_matrix_cell(event: object) -> tuple[int, int] | None:
     except (TypeError, ValueError):
         return None
     if isinstance(col_idx, str) and not col_idx.strip().isdigit():
-        return row_idx, col_idx  # column label; resolved after this helper
+        return row_idx, col_idx
     try:
         return row_idx, int(col_idx)
     except (TypeError, ValueError):
@@ -100,16 +99,11 @@ def handle_matrix_selection() -> None:
     if timeframe not in MATRIX_TIMEFRAMES:
         return
 
-    # Do not change keys owned by widgets from inside a dataframe callback.
-    # Save the target, then apply it at the top of the next script run.
     st.session_state["_pending_matrix_navigation"] = {
         "ticker": str(row_tickers[row_idx]),
         "timeframe": timeframe,
     }
 
-
-# Apply a matrix selection before the analysis controls are rendered.
-# The matrix stays on the page; selection only updates the analysis below.
 st.session_state.setdefault("selected_tf", "1h")
 st.session_state.setdefault("selected_analysis_ticker", "")
 
@@ -124,25 +118,16 @@ if isinstance(_pending_navigation, dict):
 st.title("📈 BM's Trading Algo")
 st.caption("Rule-based entry, exit, and wait signals with technical indicators — not a trade execution system.")
 
-
 # ---------------------------------------------------------------------------
 # Data retrieval and normalization
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=300, show_spinner=False)
 def download_ohlcv(ticker: str, interval: str, period: str) -> pd.DataFrame:
-    """Cached Yahoo Finance OHLCV download with normalized columns/index."""
     try:
         raw = yf.download(
-            tickers=ticker,
-            interval=interval,
-            period=period,
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-            group_by="column",
-            timeout=20,
-            prepost=False,
+            tickers=ticker, interval=interval, period=period, auto_adjust=True,
+            progress=False, threads=False, group_by="column", timeout=20, prepost=False,
         )
     except Exception:
         return pd.DataFrame()
@@ -150,9 +135,7 @@ def download_ohlcv(ticker: str, interval: str, period: str) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
 
-    # yfinance versions may return a MultiIndex even for one ticker.
     if isinstance(raw.columns, pd.MultiIndex):
-        # Select the level containing OHLCV labels, rather than assuming level 0.
         chosen_level = None
         for level in range(raw.columns.nlevels):
             vals = {str(v).lower() for v in raw.columns.get_level_values(level)}
@@ -210,12 +193,7 @@ def download_vix(period: str = "2y") -> pd.Series:
         return pd.Series(dtype=float)
 
 
-def is_intraday_tf(tf: str) -> bool:
-    return tf in ("5m", "15m", "1h", "4h")
-
-
 def filter_unclosed_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
-    """Conservatively remove the currently forming bar where it can be identified."""
     if df.empty:
         return df
     now = datetime.now(NY).replace(tzinfo=None)
@@ -225,10 +203,8 @@ def filter_unclosed_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
         durations = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
         mins = durations[tf]
         last_ts = pd.Timestamp(out.index[-1])
-        # US regular session ends at 16:00 ET. Bars near the close may be shorter.
         session_close = last_ts.normalize() + pd.Timedelta(hours=16)
         expected_end = min(last_ts + pd.Timedelta(minutes=mins), session_close)
-        # If the last timestamp is outside regular hours, use its nominal interval.
         if last_ts.time() >= dt_time(16, 0):
             expected_end = last_ts + pd.Timedelta(minutes=mins)
         if now < expected_end:
@@ -240,8 +216,6 @@ def filter_unclosed_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
             out = out.iloc[:-1]
     elif tf == "1wk":
         last_ts = pd.Timestamp(out.index[-1])
-        # Yahoo weekly bars generally begin on Monday. Treat the current week as open
-        # until Friday's regular session is over.
         bar_week_monday = last_ts.normalize() - pd.Timedelta(days=last_ts.weekday())
         current_week_monday = pd.Timestamp(now.date()).normalize() - pd.Timedelta(days=now.weekday())
         friday_close = current_week_monday + pd.Timedelta(days=4, hours=16, minutes=10)
@@ -251,10 +225,6 @@ def filter_unclosed_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
 
 
 def resample_4h_regular_session(hourly: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate hourly regular-session bars into session-anchored 4-hour groups.
-    Grouping is anchored to 09:30 ET and never combines bars from different dates.
-    """
     if hourly.empty:
         return hourly
     df = hourly.copy()
@@ -262,20 +232,15 @@ def resample_4h_regular_session(hourly: pd.DataFrame) -> pd.DataFrame:
     df["_date"] = idx.date
     minutes_from_open = (idx.hour * 60 + idx.minute) - (9 * 60 + 30)
     df["_bucket"] = np.floor_divide(np.maximum(minutes_from_open, 0), 240)
-    # Ignore timestamps outside regular session; avoids accidentally mixing pre/post-market.
     regular = (minutes_from_open >= 0) & (minutes_from_open < 390)
     df = df.loc[regular]
     if df.empty:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     grouped = df.groupby(["_date", "_bucket"], sort=True)
     out = grouped.agg(
-        Open=("Open", "first"),
-        High=("High", "max"),
-        Low=("Low", "min"),
-        Close=("Close", "last"),
-        Volume=("Volume", "sum"),
+        Open=("Open", "first"), High=("High", "max"), Low=("Low", "min"),
+        Close=("Close", "last"), Volume=("Volume", "sum"),
     )
-    # Give each 4h candle the timestamp of its first constituent bar.
     first_idx = df.groupby(["_date", "_bucket"], sort=True).apply(lambda x: x.index[0])
     out.index = pd.DatetimeIndex([pd.Timestamp(v) for v in first_idx.to_list()])
     out.index.name = "Datetime"
@@ -284,12 +249,8 @@ def resample_4h_regular_session(hourly: pd.DataFrame) -> pd.DataFrame:
 
 def get_price_data(ticker: str, tf: str) -> pd.DataFrame:
     settings = {
-        "5m": ("5m", "60d"),
-        "15m": ("15m", "60d"),
-        "1h": ("1h", "730d"),
-        "4h": ("1h", "730d"),
-        "1d": ("1d", "5y"),
-        "1wk": ("1wk", "10y"),
+        "5m": ("5m", "60d"), "15m": ("15m", "60d"), "1h": ("1h", "730d"),
+        "4h": ("1h", "730d"), "1d": ("1d", "5y"), "1wk": ("1wk", "10y"),
     }
     interval, period = settings[tf]
     data = download_ohlcv(ticker.upper(), interval, period)
@@ -301,8 +262,6 @@ def get_price_data(ticker: str, tf: str) -> pd.DataFrame:
     if data.empty:
         return data
 
-    # Use only the previous completed daily VIX close for a conservative, no-look-ahead
-    # risk context. Never backfill missing VIX observations from the future.
     vix = download_vix()
     if not vix.empty:
         vix_available = vix.copy()
@@ -335,18 +294,15 @@ def get_price_data(ticker: str, tf: str) -> pd.DataFrame:
         data["VIX"] = np.nan
     return data
 
-
 # ---------------------------------------------------------------------------
-# Indicator calculations (pandas/numpy only; no pandas-ta or SciPy dependency)
+# Indicator calculations 
 # ---------------------------------------------------------------------------
 
 def ema(series: pd.Series, length: int) -> pd.Series:
     return series.ewm(span=max(1, int(length)), adjust=False, min_periods=max(1, int(length))).mean()
 
-
 def sma(series: pd.Series, length: int) -> pd.Series:
     return series.rolling(max(1, int(length)), min_periods=max(1, int(length))).mean()
-
 
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
@@ -360,17 +316,14 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     result = result.mask((avg_gain == 0) & (avg_loss > 0), 0)
     return result
 
-
 def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     prev_close = df["Close"].shift(1)
     tr = pd.concat(
         [(df["High"] - df["Low"]).abs(),
          (df["High"] - prev_close).abs(),
-         (df["Low"] - prev_close).abs()],
-        axis=1,
+         (df["Low"] - prev_close).abs()], axis=1,
     ).max(axis=1)
     return tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-
 
 def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
     up_move = df["High"].diff()
@@ -383,7 +336,6 @@ def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
     minus_di = 100 * minus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean() / atr_smooth
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
     return dx.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-
 
 def add_indicators(df: pd.DataFrame, tf: str, p: dict) -> pd.DataFrame:
     out = df.copy()
@@ -405,16 +357,16 @@ def add_indicators(df: pd.DataFrame, tf: str, p: dict) -> pd.DataFrame:
     out["BB_Upper"] = bb_mid + p["bb_std"] * bb_std
     out["BB_Lower"] = bb_mid - p["bb_std"] * bb_std
     
-    # Keltner Channels & TTM Squeeze
+    # Experimental: Keltner Channels & TTM Squeeze
     kc_mid = sma(out["Close"], 20)
     kc_upper = kc_mid + 1.5 * out["ATR"]
     kc_lower = kc_mid - 1.5 * out["ATR"]
     out["Squeeze_On"] = (out["BB_Upper"] < kc_upper) & (out["BB_Lower"] > kc_lower)
     
-    # RSI Bullish Divergence (Price drops, RSI rises over last 10 periods)
+    # Experimental: RSI Bullish Divergence
     out["RSI_Div"] = (out["Close"] < out["Close"].shift(10)) & (out["RSI"] > out["RSI"].shift(10))
     
-    # Chandelier Trailing Stop (Long)
+    # Experimental: Chandelier Trailing Stop (Long)
     highest_high = out["High"].rolling(22, min_periods=22).max()
     out["Chandelier_Exit"] = highest_high - 3 * out["ATR"]
 
@@ -426,10 +378,9 @@ def add_indicators(df: pd.DataFrame, tf: str, p: dict) -> pd.DataFrame:
     out["MACD_Signal"] = macd_signal
     out["MACD_Hist"] = macd_line - macd_signal
 
-    # Intraday VWAP resets each calendar day and is based only on bars in that session.
-    # ONLY applied to 5m and 15m as per the signal logic constraints.
-    typical = (out["High"] + out["Low"] + out["Close"]) / 3
+    # QAQC Fix: VWAP is strictly an intraday session metric.
     if tf in ("5m", "15m"):
+        typical = (out["High"] + out["Low"] + out["Close"]) / 3
         dates = pd.DatetimeIndex(out.index).normalize()
         cum_pv = (typical * out["Volume"]).groupby(dates).cumsum()
         cum_vol = out["Volume"].groupby(dates).cumsum().replace(0, np.nan)
@@ -437,11 +388,9 @@ def add_indicators(df: pd.DataFrame, tf: str, p: dict) -> pd.DataFrame:
     else:
         out["VWAP"] = np.nan
 
-    # Directional movement supports clear trend confirmation, not just ADX strength.
     out["Trend_Up"] = out["SMA_Fast"] > out["SMA_Slow"]
     out["Trend_Down"] = out["SMA_Fast"] < out["SMA_Slow"]
     return out.replace([np.inf, -np.inf], np.nan)
-
 
 # ---------------------------------------------------------------------------
 # Strategy, structural levels, and trade plans
@@ -467,639 +416,33 @@ class TradingScanner:
 
         trending = row["ADX"] >= self.p["adx_thresh"]
         volume_ok = row["RVOL"] >= self.p["rvol_min"]
-        vix_ok = (not np.isfinite(row.get("VIX", np.nan))) or (row["VIX"] < self.vix_max)
+        
+        # QAQC Fix: Missing VIX now explicitly flags a WAIT rather than passing.
+        vix_val = row.get("VIX", np.nan)
+        if not np.isfinite(vix_val):
+            vix_ok = False
+            vix_reason = "WAIT — MISSING VIX DATA"
+        elif vix_val >= self.vix_max:
+            vix_ok = False
+            vix_reason = f"WAIT — HIGH VIX ({vix_val:.1f} >= {self.vix_max})"
+        else:
+            vix_ok = True
+            vix_reason = ""
+
         not_chasing = row["Close"] <= row["BB_Upper"]
         not_panic_selling = row["Close"] >= row["BB_Lower"]
 
         if tf in ("5m", "15m"):
             up = row["EMA_Fast"] > row["EMA_Slow"] and row["Close"] > row["VWAP"]
             down = row["EMA_Fast"] < row["EMA_Slow"] and row["Close"] < row["VWAP"]
-            long_momentum = (self.p["rsi_os"] <= row["RSI"] <= self.p["rsi_ob"]) or row["RSI_Div"]
+            long_momentum = (self.p["rsi_os"] <= row["RSI"] <= self.p["rsi_ob"])
             short_momentum = row["RSI"] >= self.p["short_rsi_min"]
             buy = up and long_momentum and trending and volume_ok and not_chasing and vix_ok
             sell = down and short_momentum and trending and volume_ok and not_panic_selling
         else:
             up = row["SMA_Fast"] > row["SMA_Slow"]
             down = row["SMA_Fast"] < row["SMA_Slow"]
-            long_momentum = (self.p["swing_rsi_min"] <= row["RSI"] <= self.p["rsi_os"]) or row["RSI_Div"]
+            long_momentum = (self.p["swing_rsi_min"] <= row["RSI"] <= self.p["rsi_os"])
             short_momentum = row["RSI"] >= self.p["short_rsi_min"]
-            buy = up and long_momentum and row["MACD_Hist"] > 0 and trending and volume_ok and not_chasing and vix_ok
-            sell = down and short_momentum and row["MACD_Hist"] < 0 and trending and not_panic_selling
-
-        if buy:
-            reason = "Trend, momentum, regime, volume, and price filters pass."
-            if row.get("Squeeze_On"):
-                reason += " 🚀 TTM Squeeze Active!"
-            if row.get("RSI_Div"):
-                reason += " 🔎 Bullish Divergence Detected!"
-            return {"action": "BUY", "reason": reason}
-            
-        if sell:
-            return {"action": "SELL / AVOID", "reason": "Bearish conditions; this is not a short-entry recommendation."}
-        if not trending:
-            return {"action": "CHOP / RANGE", "reason": f"ADX below {self.p['adx_thresh']}."}
-        if not volume_ok:
-            return {"action": "WAIT", "reason": f"RVOL below {self.p['rvol_min']:.2f}."}
-        if not vix_ok:
-            return {"action": "WAIT — HIGH VIX", "reason": f"Previous completed VIX close is at/above {self.vix_max}."}
-        return {"action": "WAIT", "reason": "No complete setup."}
-
-    def support_resistance(self, df: pd.DataFrame, lookback: int = 150, order: int = 5):
-        if df.empty or len(df) < (order * 2 + 5):
-            return [], []
-        close = df["Close"].tail(lookback).to_numpy(dtype=float)
-        current = close[-1]
-        supports, resistances = [], []
-        for i in range(order, len(close) - order):
-            window = close[i - order:i + order + 1]
-            if close[i] == np.max(window) and np.sum(window == close[i]) == 1 and close[i] > current:
-                resistances.append(float(close[i]))
-            if close[i] == np.min(window) and np.sum(window == close[i]) == 1 and close[i] < current:
-                supports.append(float(close[i]))
-        def dedupe(values):
-            result = []
-            for value in sorted(values):
-                if not result or abs(value - result[-1]) / max(abs(value), 1e-9) > 0.002:
-                    result.append(value)
-            return result
-        supports = sorted(dedupe(supports), reverse=True)[:3]
-        resistances = sorted(dedupe(resistances))[:3]
-        return supports, resistances
-
-    def trade_plan(self, row: pd.Series, supports: list[float], is_intraday: bool,
-                   account_equity: float, risk_pct: float, max_position_pct: float,
-                   slippage_bps: float) -> dict:
-        price = float(row["Close"])
-        atr_value = float(row["ATR"])
-        sl_mult = self.p["intraday_sl_atr"] if is_intraday else self.p["swing_sl_atr"]
-        tp_mult = self.p["intraday_tp_atr"] if is_intraday else self.p["swing_tp_atr"]
-        stop = price - sl_mult * atr_value
-        target = price + tp_mult * atr_value
-        entry = price * (1 + slippage_bps / 10000)
-        stop_distance = max(entry - stop, 0)
-        risk_dollars = account_equity * risk_pct / 100
-        shares_risk = int(risk_dollars / stop_distance) if stop_distance > 0 else 0
-        shares_cap = int((account_equity * max_position_pct / 100) / entry) if entry > 0 else 0
-        shares = max(0, min(shares_risk, shares_cap))
-        pullback = next((s for s in supports if s < price and s > stop), np.nan)
-        rr = (target - entry) / stop_distance if stop_distance > 0 else np.nan
-        return {
-            "price": price, "entry": entry, "stop": stop, "target": target,
-            "tp2": price + (4.0 if not is_intraday else 2.0) * atr_value,
-            "tp3": price + (6.0 if not is_intraday else 3.0) * atr_value,
-            "pullback": pullback, "risk_dollars": risk_dollars,
-            "shares": shares, "position_value": shares * entry,
-            "risk_if_stop": shares * stop_distance, "rr": rr,
-        }
-
-
-# ---------------------------------------------------------------------------
-# Backtest: long-only, next-bar open, one position at a time per ticker.
-# ---------------------------------------------------------------------------
-
-def backtest_long_only(df: pd.DataFrame, scanner: TradingScanner, tf: str,
-                       hold_bars: int, slippage_bps: float, commission_per_share: float) -> dict:
-    trades = []
-    if df.empty or len(df) < max(scanner.p["sma_slow"] + 10, 80):
-        return {"trades": pd.DataFrame(), "setups": 0, "closed": 0, "wins": 0,
-                "losses": 0, "win_rate": np.nan, "profit_factor": np.nan,
-                "expectancy_r": np.nan, "max_drawdown_pct": np.nan}
-
-    i = max(scanner.p["sma_slow"], 50)
-    while i < len(df) - 1:
-        row = df.iloc[i]
-        sig = scanner.signal(row, tf)
-        if sig["action"] != "BUY":
-            i += 1
-            continue
-
-        setups_index = i
-        entry_bar = i + 1
-        entry = float(df.iloc[entry_bar]["Open"]) * (1 + slippage_bps / 10000)
-        atr_value = float(row["ATR"])
-        if not np.isfinite(entry) or not np.isfinite(atr_value) or atr_value <= 0:
-            i += 1
-            continue
-        is_intraday = tf in ("5m", "15m")
-        sl_mult = scanner.p["intraday_sl_atr"] if is_intraday else scanner.p["swing_sl_atr"]
-        tp_mult = scanner.p["intraday_tp_atr"] if is_intraday else scanner.p["swing_tp_atr"]
-        stop = entry - sl_mult * atr_value
-        target = entry + tp_mult * atr_value
-        last_bar = min(len(df) - 1, entry_bar + hold_bars - 1)
-        exit_price = None
-        exit_i = last_bar
-        exit_reason = "TIME EXIT"
-
-        for j in range(entry_bar, last_bar + 1):
-            bar = df.iloc[j]
-            hit_stop = float(bar["Low"]) <= stop
-            hit_target = float(bar["High"]) >= target
-            if hit_stop and hit_target:
-                exit_price = stop * (1 - slippage_bps / 10000)
-                exit_i, exit_reason = j, "STOP (both touched; conservative)"
-                break
-            if hit_stop:
-                exit_price = stop * (1 - slippage_bps / 10000)
-                exit_i, exit_reason = j, "STOP"
-                break
-            if hit_target:
-                exit_price = target * (1 - slippage_bps / 10000)
-                exit_i, exit_reason = j, "TARGET"
-                break
-
-        if exit_price is None:
-            exit_price = float(df.iloc[exit_i]["Close"]) * (1 - slippage_bps / 10000)
-        shares = 1
-        gross = (exit_price - entry) * shares
-        costs = 2 * commission_per_share * shares
-        net = gross - costs
-        initial_risk = max(entry - stop, 1e-9) * shares + costs
-        trades.append({
-            "Signal Time": df.index[setups_index],
-            "Entry Time": df.index[entry_bar],
-            "Exit Time": df.index[exit_i],
-            "Entry": entry, "Stop": stop, "Target": target, "Exit": exit_price,
-            "Exit Reason": exit_reason, "Net P/L per Share": net,
-            "R Multiple": net / initial_risk, "Win": net > 0,
-            "Bars Held": exit_i - entry_bar + 1,
-        })
-        i = exit_i + 1
-
-    tdf = pd.DataFrame(trades)
-    if tdf.empty:
-        return {"trades": tdf, "setups": 0, "closed": 0, "wins": 0, "losses": 0,
-                "win_rate": np.nan, "profit_factor": np.nan,
-                "expectancy_r": np.nan, "max_drawdown_pct": np.nan}
-    pnl = tdf["Net P/L per Share"].astype(float)
-    wins = int((pnl > 0).sum())
-    losses = int((pnl <= 0).sum())
-    gross_profit = float(pnl[pnl > 0].sum())
-    gross_loss = abs(float(pnl[pnl < 0].sum()))
-    pf = gross_profit / gross_loss if gross_loss > 0 else (np.inf if gross_profit > 0 else np.nan)
-    equity = pnl.cumsum()
-    peak = equity.cummax()
-    drawdown = equity - peak
-    max_dd = float(drawdown.min())
-    return {
-        "trades": tdf, "setups": len(tdf), "closed": len(tdf), "wins": wins,
-        "losses": losses, "win_rate": 100 * wins / len(tdf),
-        "profit_factor": pf, "expectancy_r": float(tdf["R Multiple"].mean()),
-        "max_drawdown_pct": max_dd, 
-    }
-
-
-# ---------------------------------------------------------------------------
-# UI helpers
-# ---------------------------------------------------------------------------
-
-def format_money(x):
-    return "N/A" if x is None or not np.isfinite(x) else f"${x:,.2f}"
-
-def safe_indicator_row(df: pd.DataFrame, tf: str | None = None) -> pd.Series | None:
-    if df.empty:
-        return None
-
-    required = [
-        "Close", "ATR", "RSI", "ADX", "RVOL", "SMA_Fast", "SMA_Slow",
-        "BB_Upper", "BB_Lower", "MACD_Hist",
-    ]
-    if tf in ("5m", "15m"):
-        required.extend(["EMA_Fast", "EMA_Slow", "VWAP"])
-
-    if any(col not in df.columns for col in required):
-        return None
-
-    valid = df[required].replace([np.inf, -np.inf], np.nan).dropna()
-    if valid.empty:
-        return None
-
-    latest_valid_index = valid.index[-1]
-    return df.loc[latest_valid_index].copy()
-
-
-def make_params() -> dict:
-    return {
-        "ema_fast": 9,
-        "ema_slow": 21,
-        "sma_fast": 50,
-        "sma_slow": 200,
-        "rsi_len": 14,
-        "rsi_os": 50.0,
-        "rsi_ob": 65.0,
-        "swing_rsi_min": 35.0,
-        "short_rsi_min": 50.0,
-        "adx_thresh": 20.0,
-        "adx_len": 14,
-        "rvol_len": 20,
-        "rvol_min": 1.0,
-        "bb_len": 20,
-        "bb_std": 2.0,
-        "atr_len": 14,
-        "intraday_sl_atr": 1.5,
-        "intraday_tp_atr": 1.0,
-        "swing_sl_atr": 2.0,
-        "swing_tp_atr": 2.0,
-    }
-
-
-def analyze_ticker(ticker: str, tf: str, p: dict) -> tuple[pd.DataFrame, TradingScanner, pd.Series | None, dict]:
-    raw = get_price_data(ticker, tf)
-    scanner = TradingScanner(ticker, tf, p)
-    if raw.empty:
-        return pd.DataFrame(), scanner, None, {"action": "NO DATA", "reason": "No market data returned."}
-    indicators = add_indicators(raw, tf, p)
-    row = safe_indicator_row(indicators, tf)
-    if row is None:
-        return indicators, scanner, None, {"action": "INSUFFICIENT HISTORY", "reason": "Not enough completed candles for indicators."}
-    return indicators, scanner, row, scanner.signal(row, tf)
-
-
-params = make_params()
-
-st.caption(
-    "Signal-focused mode: review ENTRY, EXIT / AVOID, or WAIT decisions and the indicators behind them. "
-    "Account sizing, commissions, slippage, and backtest controls are hidden."
-)
-
-
-# Multi-timeframe matrix — always shown first
-# ---------------------------------------------------------------------------
-
-st.subheader("🌐 Multi-Timeframe Trend & Entry Matrix")
-st.caption("Select any timeframe cell to load that ticker’s analysis below. The matrix stays visible and does not change when you adjust the analysis timeframe.")
-tickers_text = st.text_area("Comma-separated ticker symbols", value=DEFAULT_WATCHLIST, key="matrix_tickers")
-scan = st.button("Generate Matrix", type="primary")
-if scan:
-    tickers = list(dict.fromkeys(t.strip().upper() for t in tickers_text.replace("\n", ",").split(",") if t.strip()))
-    if not tickers:
-        st.warning("Enter at least one ticker.")
-    else:
-        rows = []
-        total = len(tickers) * len(MATRIX_TIMEFRAMES)
-        done = 0
-        progress = st.progress(0)
-        status = st.empty()
-        for ticker in tickers:
-            row = {"Ticker": ticker, "Price": np.nan}
-            trend_points = 0.0
-            trend_weight = 0.0
-            entry_count = 0
-            valid_count = 0
-            for tf in MATRIX_TIMEFRAMES:
-                done += 1
-                status.text(f"Evaluating {ticker} on {tf} ({done}/{total})")
-                progress.progress(done / total)
-                df, scanner, latest, sig = analyze_ticker(ticker, tf, params)
-                if latest is None:
-                    row[tf] = sig["action"]
-                    continue
-                if not np.isfinite(row["Price"]):
-                    row["Price"] = round(float(latest["Close"]), 2)
-                valid_count += 1
-                
-                weight = {"5m": 1, "15m": 1, "1h": 2, "4h": 3, "1d": 4}[tf]
-                trend_up = bool(latest["SMA_Fast"] > latest["SMA_Slow"])
-                trend_down = bool(latest["SMA_Fast"] < latest["SMA_Slow"])
-                if trend_up:
-                    trend_points += weight
-                trend_weight += weight
-                if sig["action"] == "BUY":
-                    row[tf] = "BUY"
-                    entry_count += 1
-                elif sig["action"] == "SELL / AVOID":
-                    row[tf] = "SELL / AVOID"
-                elif sig["action"] == "CHOP / RANGE":
-                    row[tf] = "CHOP"
-                else:
-                    row[tf] = f"{'Bull' if trend_up else 'Bear' if trend_down else 'Flat'} trend; {sig['action']}"
-            row["Valid TFs"] = valid_count
-            row["Trend Alignment"] = f"{100 * trend_points / trend_weight:.0f}%" if trend_weight else "N/A"
-            row["BUY Confirmations"] = f"{entry_count}/{valid_count}" if valid_count else "N/A"
-            if entry_count >= 3 and row["Trend Alignment"] != "N/A" and float(row["Trend Alignment"].strip("%")) >= 70:
-                row["Summary"] = "High alignment — review setup"
-            elif entry_count >= 1:
-                row["Summary"] = "Some entry confirmation"
-            else:
-                row["Summary"] = "No confirmed BUY"
-            rows.append(row)
-        status.success("Matrix complete.")
-        st.session_state["_matrix_result"] = pd.DataFrame(rows)
-
-matrix = st.session_state.get("_matrix_result")
-
-if isinstance(matrix, pd.DataFrame) and not matrix.empty:
-    def matrix_cell_style(value: object) -> str:
-        text_value = str(value).upper()
-        if text_value == "BUY" or text_value.startswith("BULL TREND"):
-            return "background-color: #214D3A; color: #E8FFF1; font-weight: 600;"
-        if text_value == "SELL / AVOID" or text_value.startswith("BEAR TREND"):
-            return "background-color: #632F35; color: #FFECEF; font-weight: 600;"
-        if text_value == "CHOP" or text_value.startswith("FLAT TREND"):
-            return "background-color: #424852; color: #F1F3F5;"
-        if "INSUFFICIENT" in text_value or "NO DATA" in text_value:
-            return "background-color: #30343B; color: #C4CAD2;"
-        if "WAIT" in text_value or "HOLD" in text_value or "N/A" in text_value:
-            return "background-color: #424852; color: #F1F3F5;"
-        return "background-color: #424852; color: #F1F3F5;"
-
-    st.session_state["_matrix_row_tickers"] = matrix["Ticker"].astype(str).tolist()
-    st.session_state["_matrix_columns"] = [str(column) for column in matrix.columns]
-    styled_matrix = matrix.style.map(matrix_cell_style, subset=MATRIX_TIMEFRAMES)
-    st.caption(
-        "Select a cell under 5m, 15m, 1h, 4h, or 1d to open that ticker "
-        "and timeframe in the analysis panel below."
-    )
-    st.dataframe(
-        styled_matrix,
-        use_container_width=True,
-        hide_index=True,
-        on_select=handle_matrix_selection,
-        selection_mode="single-cell",
-        key="matrix_table",
-        height=min(680, 38 + 35 * (len(matrix) + 1)),
-    )
-
-    st.caption(
-        "Legend: green = BUY/bullish trend; red = SELL/avoid/bearish trend; slate = wait, chop, or mixed signals; "
-        "dark gray = insufficient data. Trend Alignment is a weighted descriptive score, not a probability of profit. "
-        "BUY Confirmations counts timeframes meeting this strategy's entry rules. A ticker can be bullish without a valid entry, "
-        "and no score guarantees an outcome."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Deep analysis panel — rendered below the matrix on the same page
-# ---------------------------------------------------------------------------
-
-analysis_ticker = st.session_state.get("selected_analysis_ticker", "").strip().upper()
-
-if analysis_ticker:
-    st.markdown("---")
-    st.subheader("🔎 Selected Ticker Deep-Dive")
-    control_left, control_right = st.columns([1, 2])
-    with control_left:
-        ticker = st.text_input(
-            "Analysis ticker",
-            key="selected_analysis_ticker",
-            help="Choose a ticker manually or click a ticker cell in the matrix above.",
-        ).strip().upper()
-    with control_right:
-        selected_tf = st.select_slider(
-            "Analysis timeframe",
-            options=TIMEFRAMES,
-            key="selected_tf",
-            help="This changes only the deep-dive below. It does not change the matrix.",
-        )
-
-    if ticker:
-        st.header(f"🔎 {ticker} — {selected_tf} Deep-Dive")
-        st.caption(f"Selected ticker: {ticker}  |  Analysis timeframe: {selected_tf}")
-
-        with st.spinner(f"Analyzing {ticker} ({selected_tf})..."):
-            df, scanner, latest, sig = analyze_ticker(ticker, selected_tf, params)
-        if df.empty:
-            st.error(f"No usable market data found for {ticker}. Check the symbol, interval, or Yahoo Finance availability.")
-        elif latest is None:
-            st.warning(sig["reason"])
-            st.write(f"Downloaded/aggregated candles: {len(df)}")
-        else:
-            price = float(latest["Close"])
-            is_intraday = selected_tf in ("5m", "15m", "1h", "4h")
-            supports, resistances = scanner.support_resistance(df)
-            vix_value = latest.get("VIX", np.nan)
-            
-            st.subheader("🤖 Trading Signal")
-            action = sig["action"]
-            if action == "BUY":
-                st.success("🟢 ENTRY SIGNAL — BUY")
-            elif action == "SELL / AVOID":
-                st.error("🔴 EXIT / AVOID — bearish conditions (not a short-entry signal)")
-            elif action.startswith("CHOP"):
-                st.warning("⚪ WAIT — RANGE / CHOP")
-            else:
-                st.info(f"🟡 WAIT — {action}")
-
-            st.write(f"**Why:** {sig['reason']}")
-
-            trend_up = bool(latest["SMA_Fast"] > latest["SMA_Slow"])
-            trend_down = bool(latest["SMA_Fast"] < latest["SMA_Slow"])
-            trend_label = "Bullish" if trend_up else "Bearish" if trend_down else "Neutral"
-            macd_value = latest.get("MACD_Hist", np.nan)
-            vwap_value = latest.get("VWAP", np.nan)
-            
-            indicator_cols = st.columns(4)
-            indicator_cols[0].metric("Last Close", format_money(price))
-            indicator_cols[1].metric("SMA Trend", trend_label)
-            indicator_cols[2].metric("RSI (14)", f"{latest['RSI']:.1f}")
-            indicator_cols[3].metric("ADX (14)", f"{latest['ADX']:.1f}")
-
-            indicator_cols2 = st.columns(6)
-            indicator_cols2[0].metric("Relative Volume", f"{latest['RVOL']:.2f}x")
-            indicator_cols2[1].metric("ATR", format_money(latest["ATR"]))
-            indicator_cols2[2].metric("ATR Pct", f"{latest.get('ATR_Pct', 0):.2f}%")
-            indicator_cols2[3].metric("MACD Hist", f"{macd_value:.3f}" if np.isfinite(macd_value) else "N/A")
-            indicator_cols2[4].metric("VWAP", format_money(vwap_value) if np.isfinite(vwap_value) else "N/A")
-            indicator_cols2[5].metric("Squeeze", "Active 🚀" if latest.get("Squeeze_On") else "Off")
-
-            with st.expander("How to read these indicators"):
-                st.markdown(
-                    "- **ENTRY:** The current strategy's trend, momentum, volume, and price filters align.\n"
-                    "- **EXIT / AVOID:** Bearish conditions are present; this is not a recommendation to open a short.\n"
-                    "- **WAIT:** Entry conditions are incomplete, volume is weak, or the market is ranging.\n"
-                    "- **RSI:** Momentum gauge; readings near/above 70 can indicate overbought conditions and near/below 30 oversold conditions.\n"
-                    "- **ADX:** Trend strength, not direction. Values around 20 or lower often indicate a weak trend.\n"
-                    "- **Relative Volume:** Current volume divided by its recent average; above 1.0x means above-average volume.\n"
-                    "- **MACD Histogram:** Positive values indicate bullish MACD momentum; negative values indicate bearish momentum.\n"
-                    "- **ATR:** Average true range, a measure of recent volatility—not a directional signal.\n"
-                    "- **SMA trend:** The 50-period SMA compared with the 200-period SMA. Intraday charts also show 9/21 EMA and VWAP."
-                )
-
-            # -------------------------------------------------------------------
-            # NEW: BACKTEST & TRADE PLAN INTEGRATION
-            # -------------------------------------------------------------------
-            st.markdown("---")
-            st.subheader("🧪 Historical Strategy Backtest")
-            bt_results = backtest_long_only(df, scanner, selected_tf, hold_bars=10, slippage_bps=5.0, commission_per_share=0.0)
-            bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
-            bt_col1.metric("Historical Setups", bt_results["setups"])
-            bt_col2.metric("Win Rate", f"{bt_results['win_rate']:.1f}%" if np.isfinite(bt_results['win_rate']) else "N/A")
-            bt_col3.metric("Profit Factor", f"{bt_results['profit_factor']:.2f}" if np.isfinite(bt_results['profit_factor']) else "N/A")
-            bt_col4.metric("Avg R-Multiple", f"{bt_results['expectancy_r']:.2f}R" if np.isfinite(bt_results['expectancy_r']) else "N/A")
-            
-            st.markdown("---")
-            st.subheader("🤖 Algorithmic Trade Plan")
-            tp = scanner.trade_plan(latest, supports, is_intraday, account_equity=10000, risk_pct=1.0, max_position_pct=100.0, slippage_bps=0.0)
-
-            plan_col1, plan_col2 = st.columns(2)
-            with plan_col1:
-                st.write(f"**Immediate Entry (Momentum):** {format_money(tp['entry'])}")
-                st.write(f"**Pullback Entry (Limit Order):** {format_money(tp['pullback'])}")
-                st.write(f"**Hard Stop Loss:** {format_money(tp['stop'])}")
-                st.write(f"**Dynamic Trailing Stop (Chandelier):** {format_money(latest.get('Chandelier_Exit', np.nan))}")
-            with plan_col2:
-                st.write(f"**TP 1 (Safe Target):** {format_money(tp['target'])}")
-                st.write(f"**TP 2 (Runner Target):** {format_money(tp['tp2'])}")
-                st.write(f"**TP 3 (Moon Target):** {format_money(tp['tp3'])}")
-                st.write(f"**Risk/Reward (TP1):** {tp['rr']:.2f}x" if np.isfinite(tp['rr']) else "**Risk/Reward:** N/A")
-
-            # -------------------------------------------------------------------
-
-            st.markdown("---")
-            st.subheader("🧱 Confirmed Historical Levels")
-
-            level_count = max(len(supports), len(resistances), 1)
-            support_text = [format_money(x) for x in supports]
-            resistance_text = [format_money(x) for x in resistances]
-            support_text += ["—"] * (level_count - len(support_text))
-            resistance_text += ["—"] * (level_count - len(resistance_text))
-            levels_df = pd.DataFrame({
-                "Support": support_text,
-                "Resistance": resistance_text,
-            })
-            levels_style = (
-                levels_df.style
-                .set_properties(**{
-                    "font-size": "14px",
-                    "font-weight": "400",
-                    "color": "#F1F3F5",
-                    "background-color": "#20242B",
-                    "text-align": "left",
-                })
-                .set_table_styles([
-                    {
-                        "selector": "th",
-                        "props": [
-                            ("font-size", "14px"),
-                            ("font-weight", "600"),
-                            ("color", "#F1F3F5"),
-                            ("background-color", "#303640"),
-                            ("text-align", "left"),
-                        ],
-                    },
-                    {
-                        "selector": "td",
-                        "props": [("padding", "8px 12px")],
-                    },
-                ])
-            )
-            st.dataframe(
-                levels_style,
-                hide_index=True,
-                use_container_width=True,
-                height=min(220, 38 + 35 * (level_count + 1)),
-            )
-
-            st.subheader(f"Price Action — {ticker} ({selected_tf})")
-            visible = 250 if selected_tf in ("5m", "15m") else 180 if selected_tf in ("1h", "4h") else 120
-            chart = df.tail(visible).copy()
-            chart = chart[~chart.index.duplicated(keep="last")].sort_index()
-            fig = go.Figure()
-
-            fig.add_trace(go.Candlestick(
-                x=chart.index,
-                open=chart["Open"],
-                high=chart["High"],
-                low=chart["Low"],
-                close=chart["Close"],
-                name=ticker,
-            ))
-
-            intraday_view = selected_tf in ("5m", "15m", "1h", "4h")
-
-            if intraday_view and len(chart.index) > 1:
-                expected_minutes = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}[selected_tf]
-                time_deltas = chart.index.to_series().diff()
-                gap_rows = time_deltas > pd.Timedelta(minutes=expected_minutes * 1.5)
-
-                for column in ("VWAP", "EMA_Fast", "EMA_Slow", "BB_Upper", "BB_Lower", "Chandelier_Exit"):
-                    if column in chart.columns:
-                        chart.loc[gap_rows, column] = np.nan
-
-            if selected_tf in ("5m", "15m"):
-                if "VWAP" in chart.columns:
-                    fig.add_trace(go.Scatter(
-                        x=chart.index, y=chart["VWAP"], name="Session VWAP",
-                        mode="lines", connectgaps=False,
-                        line=dict(width=1.5, dash="dot", color="yellow")
-                    ))
-                if "EMA_Fast" in chart.columns:
-                    fig.add_trace(go.Scatter(
-                        x=chart.index, y=chart["EMA_Fast"],
-                        name=f"{params['ema_fast']} EMA", mode="lines",
-                        connectgaps=False, line=dict(width=1.2, color="cyan")
-                    ))
-                if "EMA_Slow" in chart.columns:
-                    fig.add_trace(go.Scatter(
-                        x=chart.index, y=chart["EMA_Slow"],
-                        name=f"{params['ema_slow']} EMA", mode="lines",
-                        connectgaps=False, line=dict(width=1.2, color="magenta")
-                    ))
-            else:
-                for column, label, color in (
-                    ("SMA_Fast", f"{params['sma_fast']} SMA", "orange"),
-                    ("SMA_Slow", f"{params['sma_slow']} SMA", "blue"),
-                ):
-                    if column in chart.columns:
-                        fig.add_trace(go.Scatter(
-                            x=chart.index, y=chart[column], name=label,
-                            mode="lines", connectgaps=False,
-                            line=dict(width=1.4, color=color)
-                        ))
-
-            for column, label in (
-                ("BB_Upper", "Upper Bollinger"),
-                ("BB_Lower", "Lower Bollinger"),
-            ):
-                if column in chart.columns:
-                    fig.add_trace(go.Scatter(
-                        x=chart.index, y=chart[column], name=label,
-                        mode="lines", connectgaps=False,
-                        line=dict(width=1, dash="dash", color="rgba(255,255,255,0.3)")
-                    ))
-
-            # Add Chandelier Exit Plot
-            if "Chandelier_Exit" in chart.columns:
-                fig.add_trace(go.Scatter(
-                    x=chart.index, y=chart["Chandelier_Exit"], name="Chandelier Trailing Stop",
-                    mode="lines", connectgaps=False,
-                    line=dict(width=1.5, dash="dot", color="red")
-                ))
-
-            for level in supports:
-                fig.add_hline(y=level, line_dash="dot", line_color="green", opacity=0.5)
-            for level in resistances:
-                fig.add_hline(y=level, line_dash="dot", line_color="red", opacity=0.5)
-
-            fig.update_layout(
-                template="plotly_dark",
-                height=680,
-                xaxis_rangeslider_visible=False,
-                margin=dict(l=10, r=10, t=30, b=10),
-                legend=dict(orientation="h"),
-            )
-
-            if intraday_view:
-                fig.update_xaxes(
-                    type="date",
-                    rangebreaks=[
-                        dict(bounds=["sat", "mon"]),
-                        dict(bounds=[16, 9.5], pattern="hour"),
-                    ],
-                )
-
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(
-                f"Last candle shown: {df.index[-1]}. "
-                "Intraday charts compress weekends and regular-market closed hours; "
-                "indicator lines restart after large session gaps. "
-                "Prices are auto-adjusted Yahoo Finance history."
-            )
-
-
-    # ---------------------------------------------------------------------------
-
-st.markdown("---")
-st.caption(
-    "BM's Trading Algo • Educational/research tool • Not a broker, not an execution engine, and not investment advice. "
-    "Always independently verify prices, liquidity, earnings, corporate actions, and order conditions."
-)
+            # QAQC clarification: MACD Histogram is used as a Momentum Regime filter (>0), not a 1-bar crossover trigger.
+            buy = up and long_momentum and row["MACD_Hist"] > 0 and trending and volume_ok and not_chasing
