@@ -194,6 +194,7 @@ def download_vix(period: str = "2y") -> pd.Series:
 
 
 def filter_unclosed_candles(df: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """Conservatively remove the currently forming bar where it can be identified."""
     if df.empty:
         return df
     now = datetime.now(NY).replace(tzinfo=None)
@@ -378,7 +379,7 @@ def add_indicators(df: pd.DataFrame, tf: str, p: dict) -> pd.DataFrame:
     out["MACD_Signal"] = macd_signal
     out["MACD_Hist"] = macd_line - macd_signal
 
-    # QAQC Fix: VWAP is strictly an intraday session metric.
+    # Session VWAP is mathematically restricted to intraday timeframes.
     if tf in ("5m", "15m"):
         typical = (out["High"] + out["Low"] + out["Close"]) / 3
         dates = pd.DatetimeIndex(out.index).normalize()
@@ -417,7 +418,6 @@ class TradingScanner:
         trending = row["ADX"] >= self.p["adx_thresh"]
         volume_ok = row["RVOL"] >= self.p["rvol_min"]
         
-        # QAQC Fix: Missing VIX now explicitly flags a WAIT rather than passing.
         vix_val = row.get("VIX", np.nan)
         if not np.isfinite(vix_val):
             vix_ok = False
@@ -444,7 +444,6 @@ class TradingScanner:
             down = row["SMA_Fast"] < row["SMA_Slow"]
             long_momentum = (self.p["swing_rsi_min"] <= row["RSI"] <= self.p["rsi_os"])
             short_momentum = row["RSI"] >= self.p["short_rsi_min"]
-            # QAQC clarification: MACD Histogram is used as a Momentum Regime filter (>0), not a 1-bar crossover trigger.
             buy = up and long_momentum and row["MACD_Hist"] > 0 and trending and volume_ok and not_chasing and vix_ok
             sell = down and short_momentum and row["MACD_Hist"] < 0 and trending and not_panic_selling
 
@@ -485,7 +484,6 @@ class TradingScanner:
         resistances = sorted(dedupe(resistances))[:3]
         return supports, resistances
 
-    # QAQC Fix: Trade Plan stripped of account sizing inputs. Purely informational levels.
     def trade_plan(self, row: pd.Series, supports: list[float], is_intraday: bool, slippage_bps: float = 5.0) -> dict:
         price = float(row["Close"])
         atr_value = float(row["ATR"])
@@ -510,7 +508,7 @@ class TradingScanner:
 # ---------------------------------------------------------------------------
 # Backtest Logic
 # ---------------------------------------------------------------------------
-def backtest_long_only(df: pd.DataFrame, scanner: TradingScanner, tf: str, hold_bars: int, slippage_bps: float) -> dict:
+def backtest_long_only(df: pd.DataFrame, scanner: TradingScanner, tf: str, hold_bars: int, slippage_bps: float, commission_per_share: float) -> dict:
     trades = []
     if df.empty or len(df) < max(scanner.p["sma_slow"] + 10, 80):
         return {"trades": pd.DataFrame(), "setups": 0, "wins": 0, "win_rate": np.nan, "profit_factor": np.nan, "expectancy_r": np.nan, "max_drawdown_per_share": np.nan}
@@ -541,6 +539,7 @@ def backtest_long_only(df: pd.DataFrame, scanner: TradingScanner, tf: str, hold_
 
         for j in range(entry_bar, last_bar + 1):
             bar = df.iloc[j]
+            # Handle conflict: if both stop and target touched in same candle, assume worst-case (Stop).
             if float(bar["Low"]) <= stop and float(bar["High"]) >= target:
                 exit_price = stop * (1 - slippage_bps / 10000)
                 exit_i = j
@@ -557,8 +556,12 @@ def backtest_long_only(df: pd.DataFrame, scanner: TradingScanner, tf: str, hold_
         if exit_price is None:
             exit_price = float(df.iloc[exit_i]["Close"]) * (1 - slippage_bps / 10000)
             
-        net = (exit_price - entry)
-        initial_risk = max(entry - stop, 1e-9)
+        shares = 1
+        gross = (exit_price - entry) * shares
+        costs = 2 * commission_per_share * shares
+        net = gross - costs
+        initial_risk = max(entry - stop, 1e-9) * shares + costs
+
         trades.append({
             "Net P/L per Share": net,
             "R Multiple": net / initial_risk,
@@ -761,7 +764,7 @@ if analysis_ticker:
             st.warning(sig["reason"])
         else:
             price = float(latest["Close"])
-            is_intraday = selected_tf in ("5m", "15m", "1h", "4h")
+            is_intraday = selected_tf in ("5m", "15m")
             supports, resistances = scanner.support_resistance(df)
             vix_value = latest.get("VIX", np.nan)
             
@@ -797,7 +800,7 @@ if analysis_ticker:
             indicator_cols2[1].metric("ATR", format_money(latest["ATR"]))
             indicator_cols2[2].metric("ATR Pct", f"{latest.get('ATR_Pct', 0):.2f}%")
             indicator_cols2[3].metric("MACD Hist", f"{macd_value:.3f}" if np.isfinite(macd_value) else "N/A")
-            indicator_cols2[4].metric("VWAP", format_money(vwap_value) if np.isfinite(vwap_value) else "N/A")
+            indicator_cols2[4].metric("VWAP (Intraday)", format_money(vwap_value) if np.isfinite(vwap_value) else "N/A")
             indicator_cols2[5].metric("Prior VIX Close", f"{vix_value:.1f}" if np.isfinite(vix_value) else "N/A")
 
             # -------------------------------------------------------------------
@@ -805,7 +808,8 @@ if analysis_ticker:
             # -------------------------------------------------------------------
             st.markdown("---")
             st.subheader("🧪 Historical Strategy Backtest")
-            bt_results = backtest_long_only(df, scanner, selected_tf, hold_bars=10, slippage_bps=5.0)
+            # Slippage and commission variables exposed here for analytical review.
+            bt_results = backtest_long_only(df, scanner, selected_tf, hold_bars=10, slippage_bps=5.0, commission_per_share=0.0)
             bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
             bt_col1.metric("Historical Setups", bt_results["setups"])
             bt_col2.metric("Win Rate", f"{bt_results['win_rate']:.1f}%" if np.isfinite(bt_results['win_rate']) else "N/A")
@@ -815,7 +819,7 @@ if analysis_ticker:
             st.markdown("---")
             st.subheader("🤖 Informational Trade Plan Zones")
             st.caption("ATR-based reference levels. Always independently verify sizing and risk budget.")
-            tp = scanner.trade_plan(latest, supports, is_intraday=(selected_tf in ("5m", "15m")), slippage_bps=5.0)
+            tp = scanner.trade_plan(latest, supports, is_intraday=is_intraday, slippage_bps=5.0)
 
             plan_col1, plan_col2 = st.columns(2)
             with plan_col1:
