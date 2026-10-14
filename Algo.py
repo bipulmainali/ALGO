@@ -120,7 +120,7 @@ if isinstance(_pending_navigation, dict):
         st.session_state["_auto_run_deep_dive"] = True
 
 st.title("📈 BM's Trading Algo")
-st.caption("Rule-based screening, trade planning, and historical research — not a trade execution system.")
+st.caption("Rule-based entry, exit, and wait signals with technical indicators — not a trade execution system.")
 
 
 # ---------------------------------------------------------------------------
@@ -677,40 +677,29 @@ def safe_indicator_row(
 
 
 def make_params() -> dict:
-    with st.sidebar.expander("⚙️ Strategy & Data Parameters", expanded=False):
-        st.caption("Changing parameters changes the strategy. Validate changes out of sample.")
-        p = {
-            "ema_fast": int(st.number_input("Fast EMA", min_value=2, max_value=50, value=9)),
-            "ema_slow": int(st.number_input("Slow EMA", min_value=3, max_value=100, value=21)),
-            "sma_fast": int(st.number_input("Fast SMA", min_value=5, max_value=150, value=50)),
-            "sma_slow": int(st.number_input("Slow SMA", min_value=20, max_value=400, value=200)),
-            "rsi_len": int(st.number_input("RSI Length", min_value=2, max_value=50, value=14)),
-            "rsi_os": float(st.number_input("RSI Pullback Ceiling", min_value=20.0, max_value=70.0, value=50.0, step=1.0)),
-            "rsi_ob": float(st.number_input("Intraday RSI Upper Bound", min_value=40.0, max_value=90.0, value=65.0, step=1.0)),
-            "swing_rsi_min": float(st.number_input("Swing RSI Lower Bound", min_value=10.0, max_value=60.0, value=35.0, step=1.0)),
-            "short_rsi_min": float(st.number_input("Bearish RSI Minimum", min_value=35.0, max_value=80.0, value=50.0, step=1.0)),
-            "adx_thresh": float(st.number_input("Minimum ADX", min_value=5.0, max_value=50.0, value=20.0, step=1.0)),
-            "adx_len": int(st.number_input("ADX Length", min_value=5, max_value=40, value=14)),
-            "rvol_len": int(st.number_input("RVOL Average Length", min_value=5, max_value=100, value=20)),
-            "rvol_min": float(st.number_input("Minimum RVOL", min_value=0.2, max_value=5.0, value=1.0, step=0.1)),
-            "bb_len": int(st.number_input("Bollinger Length", min_value=5, max_value=100, value=20)),
-            "bb_std": float(st.number_input("Bollinger Standard Deviations", min_value=1.0, max_value=4.0, value=2.0, step=0.25)),
-            "atr_len": int(st.number_input("ATR Length", min_value=5, max_value=50, value=14)),
-            "intraday_sl_atr": float(st.number_input("Intraday Stop (ATR)", min_value=0.5, max_value=5.0, value=1.5, step=0.25)),
-            "intraday_tp_atr": float(st.number_input("Intraday Target (ATR)", min_value=0.5, max_value=5.0, value=1.0, step=0.25)),
-            "swing_sl_atr": float(st.number_input("Swing Stop (ATR)", min_value=0.5, max_value=6.0, value=2.0, step=0.25)),
-            "swing_tp_atr": float(st.number_input("Swing Target (ATR)", min_value=0.5, max_value=10.0, value=2.0, step=0.5)),
-        }
-    # Keep lengths logically ordered; avoid accidentally using a "fast" average slower than "slow".
-    if p["ema_fast"] >= p["ema_slow"]:
-        st.sidebar.warning("Fast EMA must be shorter than slow EMA. Defaults are used for EMA lengths.")
-        p["ema_fast"], p["ema_slow"] = 9, 21
-    if p["sma_fast"] >= p["sma_slow"]:
-        st.sidebar.warning("Fast SMA must be shorter than slow SMA. Defaults are used for SMA lengths.")
-        p["sma_fast"], p["sma_slow"] = 50, 200
-    if p["swing_rsi_min"] > p["rsi_os"]:
-        p["swing_rsi_min"] = min(35.0, p["rsi_os"])
-    return p
+    """Use consistent built-in indicator settings; no tuning controls in the UI."""
+    return {
+        "ema_fast": 9,
+        "ema_slow": 21,
+        "sma_fast": 50,
+        "sma_slow": 200,
+        "rsi_len": 14,
+        "rsi_os": 50.0,
+        "rsi_ob": 65.0,
+        "swing_rsi_min": 35.0,
+        "short_rsi_min": 50.0,
+        "adx_thresh": 20.0,
+        "adx_len": 14,
+        "rvol_len": 20,
+        "rvol_min": 1.0,
+        "bb_len": 20,
+        "bb_std": 2.0,
+        "atr_len": 14,
+        "intraday_sl_atr": 1.5,
+        "intraday_tp_atr": 1.0,
+        "swing_sl_atr": 2.0,
+        "swing_tp_atr": 2.0,
+    }
 
 
 def analyze_ticker(ticker: str, tf: str, p: dict) -> tuple[pd.DataFrame, TradingScanner, pd.Series | None, dict]:
@@ -737,19 +726,9 @@ selected_tf = st.sidebar.select_slider(
 )
 params = make_params()
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Risk & Backtest Settings")
-account_equity = float(st.sidebar.number_input("Account Equity ($)", min_value=100.0, max_value=10_000_000.0, value=25_000.0, step=1000.0))
-risk_pct = float(st.sidebar.number_input("Risk Budget per Trade (%)", min_value=0.1, max_value=5.0, value=0.5, step=0.1))
-max_position_pct = float(st.sidebar.number_input("Max Position (% of Equity)", min_value=1.0, max_value=100.0, value=20.0, step=1.0))
-slippage_bps = float(st.sidebar.number_input("Estimated Slippage (basis points per side)", min_value=0.0, max_value=100.0, value=5.0, step=1.0))
-commission_per_share = float(st.sidebar.number_input("Commission ($/share/side)", min_value=0.0, max_value=1.0, value=0.0, step=0.01))
-hold_bars = int(st.sidebar.number_input("Max Backtest Holding Bars", min_value=1, max_value=200, value=10, step=1))
-vix_max = float(st.sidebar.number_input("High-VIX Caution Threshold", min_value=10.0, max_value=80.0, value=30.0, step=1.0))
-
-st.info(
-    "Research use only. Signals are based on completed candles; data availability and freshness depend on Yahoo Finance. "
-    "Backtest results are hypothetical and do not include market impact or guaranteed execution."
+st.caption(
+    "Signal-focused mode: review ENTRY, EXIT / AVOID, or WAIT decisions and the indicators behind them. "
+    "Indicator settings use fixed defaults; account sizing, commissions, slippage, and backtest controls are hidden."
 )
 
 
@@ -788,55 +767,59 @@ if mode == "Single Ticker Deep-Dive":
             cols[4].metric("ATR", format_money(latest["ATR"]))
             cols[5].metric("Prior VIX Close", f"{vix_value:.1f}" if np.isfinite(vix_value) else "Unavailable")
 
-            st.subheader("🤖 Signal & Trade Plan")
-            st.write(f"**Signal:** {sig['action']} — {sig['reason']}")
-            if sig["action"] == "BUY":
-                plan = scanner.trade_plan(
-                    latest, supports, is_intraday, account_equity, risk_pct,
-                    max_position_pct, slippage_bps
+            st.subheader("🤖 Trading Signal")
+            action = sig["action"]
+            if action == "BUY":
+                st.success("🟢 ENTRY SIGNAL — BUY")
+            elif action == "SELL / AVOID":
+                st.error("🔴 EXIT / AVOID — bearish conditions (not a short-entry signal)")
+            elif action.startswith("CHOP"):
+                st.warning("⚪ WAIT — RANGE / CHOP")
+            else:
+                st.info(f"🟡 WAIT — {action}")
+
+            st.write(f"**Why:** {sig['reason']}")
+
+            trend_up = bool(latest["SMA_Fast"] > latest["SMA_Slow"])
+            trend_down = bool(latest["SMA_Fast"] < latest["SMA_Slow"])
+            trend_label = "Bullish" if trend_up else "Bearish" if trend_down else "Neutral"
+            macd_value = latest.get("MACD_Hist", np.nan)
+            vwap_value = latest.get("VWAP", np.nan)
+            indicator_cols = st.columns(4)
+            indicator_cols[0].metric("Last Close", format_money(price))
+            indicator_cols[1].metric("Trend (SMA)", trend_label)
+            indicator_cols[2].metric("RSI (14)", f"{latest['RSI']:.1f}")
+            indicator_cols[3].metric("ADX (14)", f"{latest['ADX']:.1f}")
+
+            indicator_cols2 = st.columns(4)
+            indicator_cols2[0].metric("Relative Volume", f"{latest['RVOL']:.2f}x")
+            indicator_cols2[1].metric("ATR", format_money(latest["ATR"]))
+            indicator_cols2[2].metric(
+                "MACD Histogram",
+                f"{macd_value:.3f}" if np.isfinite(macd_value) else "N/A",
+            )
+            indicator_cols2[3].metric(
+                "VWAP",
+                format_money(vwap_value) if np.isfinite(vwap_value) else "N/A (swing timeframe)",
+            )
+
+            with st.expander("How to read these indicators"):
+                st.markdown(
+                    "- **ENTRY:** The current strategy's trend, momentum, volume, and price filters align.\n"
+                    "- **EXIT / AVOID:** Bearish conditions are present; this is not a recommendation to open a short.\n"
+                    "- **WAIT:** Entry conditions are incomplete, volume is weak, or the market is ranging.\n"
+                    "- **RSI:** Momentum gauge; readings near/above 70 can indicate overbought conditions and near/below 30 oversold conditions.\n"
+                    "- **ADX:** Trend strength, not direction. Values around 20 or lower often indicate a weak trend.\n"
+                    "- **Relative Volume:** Current volume divided by its recent average; above 1.0x means above-average volume.\n"
+                    "- **MACD Histogram:** Positive values indicate bullish MACD momentum; negative values indicate bearish momentum.\n"
+                    "- **ATR:** Average true range, a measure of recent volatility—not a directional signal.\n"
+                    "- **SMA trend:** The 50-period SMA compared with the 200-period SMA. Intraday charts also show 9/21 EMA and VWAP."
                 )
-                a, b, c = st.columns(3)
-                a.metric("Estimated Entry", format_money(plan["entry"]))
-                a.metric("Stop Loss", format_money(plan["stop"]))
-                a.metric("Target 1", format_money(plan["target"]))
-                d, e, f = st.columns(3)
-                d.metric("Pullback Level", format_money(plan["pullback"]) if np.isfinite(plan["pullback"]) else "No valid level")
-                e.metric("Estimated Shares", f"{plan['shares']:,}")
-                f.metric("Position Value", format_money(plan["position_value"]))
-                st.caption(
-                    f"Risk budget: ${plan['risk_dollars']:.2f}; estimated risk at stop: "
-                    f"${plan['risk_if_stop']:.2f}; target/stop ratio: "
-                    f"{plan['rr']:.2f}R. Quantity is constrained by both risk and position-size limits."
-                )
-                st.write(
-                    f"**Additional targets:** TP2 {format_money(plan['tp2'])} · "
-                    f"TP3 {format_money(plan['tp3'])}"
-                )
-                if not np.isfinite(plan["pullback"]):
-                    st.caption("No suitable confirmed swing-low pullback level above the proposed stop was detected.")
+
             st.subheader("🧱 Confirmed Historical Levels")
             l, r = st.columns(2)
             l.write("**Support:** " + (", ".join(format_money(x) for x in supports) if supports else "No confirmed level detected"))
             r.write("**Resistance:** " + (", ".join(format_money(x) for x in resistances) if resistances else "No confirmed level detected"))
-
-            st.subheader("🧪 Historical Backtest (Long-only)")
-            bt = backtest_long_only(df, scanner, selected_tf, hold_bars, slippage_bps, commission_per_share)
-            if bt["closed"] == 0:
-                st.warning("No completed historical trades were generated, or there is insufficient history. This is not a 0% win rate.")
-            else:
-                m = st.columns(5)
-                m[0].metric("Closed Trades", f"{bt['closed']}")
-                m[1].metric("Win Rate", f"{bt['win_rate']:.1f}%")
-                m[2].metric("Profit Factor", f"{bt['profit_factor']:.2f}" if np.isfinite(bt["profit_factor"]) else "N/A")
-                m[3].metric("Expectancy", f"{bt['expectancy_r']:.2f}R")
-                m[4].metric("Max Drawdown", f"${bt['max_drawdown_pct']:.2f}/share")
-                st.caption(
-                    f"Backtest uses next-bar open entries, one position at a time, a maximum hold of {hold_bars} bars, "
-                    "slippage and commissions. If a bar touches stop and target, the stop is assumed first. "
-                    "Drawdown is cumulative P/L per share, not account-level drawdown. No short trades are tested."
-                )
-                with st.expander("View historical trades"):
-                    st.dataframe(bt["trades"], use_container_width=True, hide_index=True)
 
             st.subheader(f"Price Action — {ticker} ({selected_tf})")
             visible = 250 if selected_tf in ("5m", "15m") else 180 if selected_tf in ("1h", "4h") else 120
@@ -973,19 +956,6 @@ elif mode == "Single-TF Watchlist Scanner":
                         "ATR %": round(float(latest["ATR_Pct"]), 2),
                         "Reason": sig["reason"],
                     }
-                    if sig["action"] == "BUY":
-                        plan = scanner.trade_plan(
-                            latest, supports, selected_tf in ("5m", "15m"),
-                            account_equity, risk_pct, max_position_pct, slippage_bps
-                        )
-                        row.update({
-                            "Entry": round(plan["entry"], 2),
-                            "Pullback": round(plan["pullback"], 2) if np.isfinite(plan["pullback"]) else np.nan,
-                            "Stop": round(plan["stop"], 2),
-                            "Target": round(plan["target"], 2),
-                            "Shares": plan["shares"],
-                            "R:R": round(plan["rr"], 2) if np.isfinite(plan["rr"]) else np.nan,
-                        })
                     rows.append(row)
                 else:
                     rows.append({"Ticker": ticker, "Signal": sig["action"], "Reason": sig["reason"]})
@@ -995,8 +965,11 @@ elif mode == "Single-TF Watchlist Scanner":
             buys = results[results["Signal"] == "BUY"] if "Signal" in results else pd.DataFrame()
             st.subheader(f"Qualified BUY Setups: {len(buys)}")
             if not buys.empty:
-                st.dataframe(buys.sort_values(["R:R", "RVOL"], ascending=False, na_position="last") if "R:R" in buys else buys,
-                             use_container_width=True, hide_index=True)
+                st.dataframe(
+                    buys.sort_values("RVOL", ascending=False, na_position="last")
+                    if "RVOL" in buys else buys,
+                    use_container_width=True, hide_index=True
+                )
             else:
                 st.info("No BUY setups qualified. This is a valid outcome; do not loosen filters solely to force signals.")
             with st.expander("Show all ticker results, including WAIT/SELL/insufficient history"):
